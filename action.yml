@@ -31,6 +31,16 @@ inputs:
       Reopen issues with the skip label when a commit or pull request closes them (needs the
       "issues: closed" trigger). Issues closed by hand stay closed.
     default: "true"
+  release-cleanup:
+    description: >
+      On pushes to the default branch (a release): remove the label from released issues, and close
+      the ones fixed only by a pull request description, which GitHub does not close by itself.
+    default: "true"
+  reopen-reverted:
+    description: >
+      Reopen issues closed by a commit whose fix was later reverted on the default branch
+      (needs the "issues: closed" trigger).
+    default: "true"
   token:
     description: >
       Token for labels and issues. GITHUB_TOKEN is enough for issues in the same repository;
@@ -73,8 +83,11 @@ outputs:
     description: Issues ignored because they have the skip label (JSON array)
     value: ${{ steps.run.outputs.skipped }}
   reopened:
-    description: Issues reopened because they have the skip label (JSON array)
+    description: Issues reopened (skip label, or reverted fix) (JSON array)
     value: ${{ steps.run.outputs.reopened }}
+  released:
+    description: Issues closed by the release cleanup (JSON array)
+    value: ${{ steps.run.outputs.released }}
 
 runs:
   using: composite
@@ -94,6 +107,8 @@ runs:
         OD_STATUS_ON_REOPEN: ${{ inputs.status-on-reopen }}
         OD_WARN_SKIPPED: ${{ inputs.warn-skipped }}
         OD_REOPEN_SKIPPED: ${{ inputs.reopen-skipped }}
+        OD_RELEASE_CLEANUP: ${{ inputs.release-cleanup }}
+        OD_REOPEN_REVERTED: ${{ inputs.reopen-reverted }}
         OD_DRY_RUN: ${{ inputs.dry-run }}
         OD_ACTION_PATH: ${{ github.action_path }}
       with:

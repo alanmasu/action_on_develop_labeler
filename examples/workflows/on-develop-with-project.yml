@@ -3,7 +3,8 @@ name: On develop
 
 on:
   push:
-    branches: [develop]
+    # develop: label fixes; main (the default branch): release cleanup
+    branches: [develop, main]
   pull_request_target:
     types: [closed]
     branches: [develop]

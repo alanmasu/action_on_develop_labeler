@@ -2,7 +2,7 @@
 
 const { parseClosingRefs, revertedSha, revertedPr } = require('./parse');
 const { openProject, tokenHint } = require('./project');
-const { MARK_WARN, warnText, reopenText, hasMarker, findCloser } = require('./skip');
+const { MARK_WARN, warnText, reopenText, revertedText, releasedText, hasMarker, findCloser } = require('./skip');
 
 const MAX_REVERT_DEPTH = 5;
 const MAX_COMPARE_PAGES = 30;
@@ -26,6 +26,8 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     statusOnReopen: (env.OD_STATUS_ON_REOPEN || '').trim(),
     reopen: !/^(0|false|no)$/i.test(env.OD_REOPEN_SKIPPED || 'true'),
     warn: !/^(0|false|no)$/i.test(env.OD_WARN_SKIPPED || 'true'),
+    releaseCleanup: !/^(0|false|no)$/i.test(env.OD_RELEASE_CLEANUP || 'true'),
+    reopenReverted: !/^(0|false|no)$/i.test(env.OD_REOPEN_REVERTED || 'true'),
   };
   const current = { owner: context.repo.owner, repo: context.repo.repo };
   // outputs always set, even on early exit (later steps compare them with '[]')
@@ -33,6 +35,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
   core.setOutput('unlabeled', '[]');
   core.setOutput('skipped', '[]');
   core.setOutput('reopened', '[]');
+  core.setOutput('released', '[]');
 
   // project: validated first, so a wrong name stops everything before touching issues
   let project = null;
@@ -146,7 +149,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
   /** Commits brought by the push, oldest first (including those brought in by a merge). */
   async function pushedCommits() {
     const p = context.payload;
-    const fromPayload = (p.commits || []).map((c) => ({ sha: c.id, message: c.message }));
+    const fromPayload = (p.commits || []).map((c) => ({ sha: c.id, message: c.message, parents: 0 }));
     if (!p.before || /^0+$/.test(p.before) || !p.after || /^0+$/.test(p.after)) return fromPayload;
     try {
       const all = [];
@@ -154,7 +157,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
         const { data } = await github.rest.repos.compareCommitsWithBasehead({
           ...current, basehead: `${p.before}...${p.after}`, per_page: 100, page,
         });
-        all.push(...data.commits.map((c) => ({ sha: c.sha, message: c.commit.message })));
+        all.push(...data.commits.map((c) => ({ sha: c.sha, message: c.commit.message, parents: (c.parents || []).length })));
         if (data.commits.length < 100) break;
       }
       return all;
@@ -176,7 +179,8 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     const branch = String(context.ref || '').replace(/^refs\/heads\//, '');
     if (!context.ref.startsWith('refs/heads/')) return core.info('Tag push: nothing to do.');
     if (branch === defaultBranch) {
-      return core.info(`"${branch}" is the default branch: GitHub closes the issues, nothing to do.`);
+      if (!opts.releaseCleanup) return core.info(`"${branch}" is the default branch and "release-cleanup" is off: nothing to do.`);
+      return handleRelease(branch);
     }
     targetBranch = branch;
     for (const c of await pushedCommits()) {
@@ -193,34 +197,140 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     return core.warning(`Event "${event}" not handled: use push, pull_request_target (closed) and issues (closed).`);
   }
 
-  // --------------------------------------------- closed issue with the skip label
+  function labelNamed(issue, name) {
+    return Boolean(name) && (issue.labels || []).some((l) => (typeof l === 'string' ? l : l.name).toLowerCase() === name.toLowerCase());
+  }
+
+  async function setStatusSafe(where, nodeId, option) {
+    if (!project || !option) return;
+    try {
+      const r = await project.setStatus(nodeId, option, opts.dryRun);
+      core.info(r === 'missing' ? `${where} is not in the project: status left unchanged.` : `${where}: ${opts.statusField} = "${option}"`);
+    } catch (e) {
+      core.warning(`${where}: status not updated (${e.message})${tokenHint(e)}`);
+    }
+  }
+
+  async function reopenWith(issue, where, body) {
+    if (opts.dryRun) return;
+    await github.rest.issues.update({ ...current, issue_number: issue.number, state: 'open' });
+    await github.rest.issues.createComment({ ...current, issue_number: issue.number, body });
+  }
+
+  /**
+   * Was the fix in commit `sha` for issue `number` reverted later on the default branch?
+   * Returns the short SHA of the commit that undid it, or null.
+   */
+  async function revertedOnDefault(sha, number) {
+    const key = `${current.owner}/${current.repo}#${number}`.toLowerCase();
+    let state = 'add';
+    let by = null;
+    for (let page = 1; page <= MAX_COMPARE_PAGES; page++) {
+      const { data } = await github.rest.repos.compareCommitsWithBasehead({
+        ...current, basehead: `${sha}...${defaultBranch}`, per_page: 100, page,
+      });
+      for (const c of data.commits) {
+        for (const e of await effectsOfMessage(c.commit.message, 0)) {
+          if (e.ref.key === key) { state = e.action; by = c.sha.slice(0, 7); }
+        }
+      }
+      if (data.commits.length < 100) break;
+    }
+    return state === 'remove' ? by : null;
+  }
+
+  // ------------------------------------------------------------- closed issue
   async function handleClosedIssue() {
     const issue = context.payload.issue;
     if (context.payload.action !== 'closed' || !issue) return core.info('Issues event other than "closed": nothing to do.');
     const where = `${current.owner}/${current.repo}#${issue.number}`;
-    const labelled = opts.skipLabel && (issue.labels || []).some((l) => (l.name || l).toLowerCase() === opts.skipLabel.toLowerCase());
-    if (!labelled) return core.info(`${where} does not have "${opts.skipLabel}": nothing to do.`);
-    if (!opts.reopen) return core.info(`${where} has "${opts.skipLabel}" but "reopen-skipped" is off.`);
     if (issue.pull_request) return core.info(`${where} is a pull request: ignored.`);
-    const closer = await findCloser(github, { ...current, number: issue.number });
-    if (!closer) return core.info(`${where} was closed by hand: left closed.`);
-    if (!opts.dryRun) {
-      await github.rest.issues.update({ ...current, issue_number: issue.number, state: 'open' });
-      await github.rest.issues.createComment({
-        ...current, issue_number: issue.number, body: reopenText({ skipLabel: opts.skipLabel, closer }),
-      });
+
+    if (labelNamed(issue, opts.skipLabel)) {
+      if (!opts.reopen) return core.info(`${where} has "${opts.skipLabel}" but "reopen-skipped" is off.`);
+      const closer = await findCloser(github, { ...current, number: issue.number });
+      if (!closer) return core.info(`${where} was closed by hand: left closed.`);
+      await reopenWith(issue, where, reopenText({ skipLabel: opts.skipLabel, closer: closer.text }));
+      core.warning(`${opts.dryRun ? '[dry-run] ' : ''}${where} reopened: it has "${opts.skipLabel}" and was closed by ${closer.text}.`);
+      await setStatusSafe(where, issue.node_id, opts.statusOnReopen);
+      core.setOutput('reopened', JSON.stringify([where]));
+      await core.summary.addHeading('Reopened', 3).addList([`${where} (closed by ${closer.text})`]).write().catch(() => {});
+      return;
     }
-    core.warning(`${opts.dryRun ? '[dry-run] ' : ''}${where} reopened: it has "${opts.skipLabel}" and was closed by ${closer}.`);
-    if (project && opts.statusOnReopen) {
-      try {
-        const r = await project.setStatus(issue.node_id, opts.statusOnReopen, opts.dryRun);
-        core.info(r === 'missing' ? `${where} is not in the project: status left unchanged.` : `${where}: ${opts.statusField} = "${opts.statusOnReopen}"`);
-      } catch (e) {
-        core.warning(`${where}: status not updated (${e.message})${tokenHint(e)}`);
+
+    if (!opts.reopenReverted) return core.info(`${where}: "reopen-reverted" is off, nothing to do.`);
+    const closer = await findCloser(github, { ...current, number: issue.number });
+    if (!closer || !closer.sha) return core.info(`${where} was not closed by a commit: nothing to do.`);
+    const reverter = await revertedOnDefault(closer.sha, issue.number);
+    if (!reverter) return core.info(`${where} was closed by ${closer.text}, which was not reverted: left closed.`);
+    await reopenWith(issue, where, revertedText({ closer: closer.text, reverter }));
+    core.warning(`${opts.dryRun ? '[dry-run] ' : ''}${where} reopened: ${closer.text} was reverted by commit ${reverter}.`);
+    await setStatusSafe(where, issue.node_id, opts.statusOnRevert);
+    core.setOutput('reopened', JSON.stringify([where]));
+    await core.summary.addHeading('Reopened', 3).addList([`${where} (${closer.text} reverted by ${reverter})`]).write().catch(() => {});
+  }
+
+  // ------------------------------------------------- release (default branch)
+  async function handleRelease(branch) {
+    const after = String(context.payload.after || '').slice(0, 7);
+    const rel = new Map();
+    const put = (list, source) => { for (const e of list) rel.set(e.ref.key, { ...e, source }); };
+    for (const c of await pushedCommits()) {
+      put(await effectsOfMessage(c.message, 0), `commit ${c.sha.slice(0, 7)}`);
+      if (c.parents > 1 && !revertedSha(c.message)) {
+        const pr = await prMergedBy(c.sha);
+        if (pr) put(await effectsOfPr(pr, 0, { includeCommits: false }), `pull request #${pr.number}`);
       }
     }
-    core.setOutput('reopened', JSON.stringify([where]));
-    await core.summary.addHeading('Reopened', 3).addList([`${where} (closed by ${closer})`]).write().catch(() => {});
+    const released = [];
+    const cleaned = [];
+    for (const { ref, action, source } of rel.values()) {
+      if (action !== 'add') continue;
+      const where = `${ref.owner}/${ref.repo}#${ref.number}`;
+      let issue;
+      try {
+        ({ data: issue } = await github.rest.issues.get({ owner: ref.owner, repo: ref.repo, issue_number: ref.number }));
+      } catch (e) {
+        core.warning(`${where} (from ${source}) not accessible: ${e.message}`);
+        continue;
+      }
+      if (issue.pull_request) continue;
+      if (labelNamed(issue, opts.skipLabel)) { core.info(`${where} has "${opts.skipLabel}": ignored.`); continue; }
+      try {
+        // commits with a closing keyword are closed by GitHub itself; pull request descriptions
+        // and manual links of pull requests merged into develop are not, so close those here
+        if (issue.state === 'open' && source.startsWith('pull request')) {
+          if (!opts.dryRun) {
+            await github.rest.issues.update({ owner: ref.owner, repo: ref.repo, issue_number: ref.number, state: 'closed', state_reason: 'completed' });
+            await github.rest.issues.createComment({
+              owner: ref.owner, repo: ref.repo, issue_number: ref.number, body: releasedText({ source, branch, sha: after }),
+            });
+          }
+          released.push(where);
+          core.info(`${opts.dryRun ? '[dry-run] ' : ''}closed ${where} (fixed by ${source}, released in ${after})`);
+        }
+        if (labelNamed(issue, opts.label)) {
+          if (!opts.dryRun) {
+            try {
+              await github.rest.issues.removeLabel({ owner: ref.owner, repo: ref.repo, issue_number: ref.number, name: opts.label });
+            } catch (e) {
+              if (e.status !== 404) throw e;
+            }
+          }
+          cleaned.push(where);
+          core.info(`${opts.dryRun ? '[dry-run] ' : ''}- "${opts.label}" from ${where} (released)`);
+        }
+      } catch (e) {
+        core.warning(`${where}: operation failed (${e.message}).`);
+      }
+    }
+    core.setOutput('released', JSON.stringify(released));
+    core.setOutput('unlabeled', JSON.stringify(cleaned));
+    await core.summary
+      .addHeading(`Release to ${branch}`, 3)
+      .addList([...released.map((x) => `closed ${x}`), ...cleaned.map((x) => `- "${opts.label}" ${x}`)].concat(released.length + cleaned.length ? [] : ['No changes']))
+      .write()
+      .catch(() => {});
   }
 
   // ------------------------------------------------------------------ apply

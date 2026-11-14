@@ -3,7 +3,8 @@ name: On develop
 
 on:
   push:
-    branches: [develop]
+    # develop: label fixes; main (the default branch): release cleanup
+    branches: [develop, main]
   # pull_request_target (not pull_request) so it also works for PRs from forks.
   # The action never checks out PR code, so this is safe.
   pull_request_target:

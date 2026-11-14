@@ -20,8 +20,23 @@ the default branch.
 | revert of a merge commit | label removed from every issue of that pull request |
 
 Ignored: closed issues, references to pull requests, issues with the `skip-label`
-(default `do not close`), pushes to the default branch, tags. If the label does not exist in the
+(default `do not close`), tags. Pushes to the default branch are handled as a release (below). If the label does not exist in the
 repository, it is created.
+
+### At release
+
+When `develop` is merged into the default branch (needs `main` in the `push` branches):
+
+- the label is **removed** from every released issue;
+- issues fixed only by a **pull request description** (`Closes #12` in a pull request merged into
+  `develop`) are **closed** with a comment: GitHub does not close them, because that pull request
+  did not target the default branch;
+- issues that GitHub closes because a commit with `Fixes #N` reached the default branch, but
+  whose fix had been **reverted**, are **reopened** with a comment (needs the `issues: [closed]`
+  trigger).
+
+Only the commits of that push are considered, so a hotfix pushed to the default branch does not
+touch issues that are still waiting on `develop`.
 
 ### Issues labeled `do not close`
 
@@ -42,7 +57,7 @@ Use `Refs #12` instead of `Fixes #12` for partial fixes: it links the issue with
 ```yaml
 on:
   push:
-    branches: [develop]
+    branches: [develop, main]
   pull_request_target:
     types: [closed]
     branches: [develop]
@@ -71,6 +86,8 @@ Complete examples in [`examples/workflows/`](examples/workflows/).
 | `skip-label` | `do not close` | Issues with this label are ignored. Empty = disabled |
 | `warn-skipped` | `true` | Comment once on skip-labeled issues referenced by a fix on `develop` |
 | `reopen-skipped` | `true` | Reopen skip-labeled issues closed by a commit or pull request |
+| `release-cleanup` | `true` | On the default branch: remove the label, close issues fixed only by pull request descriptions |
+| `reopen-reverted` | `true` | Reopen issues closed by a commit whose fix was reverted |
 | `token` | `github.token` | Needs access to other repositories for `Fixes owner/repo#N` |
 | `project-url` | | Project to update, `https://github.com/users/<user>/projects/<n>` or `.../orgs/<org>/projects/<n>` |
 | `project-token` | | Token with access to the project (`GITHUB_TOKEN` cannot) |
@@ -80,7 +97,7 @@ Complete examples in [`examples/workflows/`](examples/workflows/).
 | `status-on-reopen` | | Option set when a skip-labeled issue is reopened. Empty = leave it |
 | `dry-run` | `false` | Only report what would change |
 
-Outputs: `labeled`, `unlabeled`, `skipped`, `reopened` (JSON arrays of `owner/repo#N`). Each run also writes a
+Outputs: `labeled`, `unlabeled`, `skipped`, `reopened`, `released` (JSON arrays of `owner/repo#N`). Each run also writes a
 summary on the job page.
 
 ### With a project

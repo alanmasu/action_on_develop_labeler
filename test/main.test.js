@@ -40,8 +40,9 @@ function world({ issues = {}, commits = {}, prs = {}, compare = [], repoLabels =
         listPullRequestsAssociatedWithCommit: async ({ commit_sha }) => ({
           data: Object.values(prs).filter((p) => p.merge_commit_sha === commit_sha),
         }),
-        compareCommitsWithBasehead: async () => ({
-          data: { commits: compare.map((c) => ({ sha: c.sha, commit: { message: c.message } })) },
+        compareCommitsWithBasehead: async ({ basehead }) => ({
+          data: { commits: ((st.compareBy && st.compareBy[basehead]) || compare).map((c) => ({
+            sha: c.sha, commit: { message: c.message }, parents: Array.from({ length: c.parents || 1 }, () => ({})) })) },
         }),
       },
       pulls: {
@@ -330,4 +331,70 @@ test('riapertura: Status nel project e dry-run', async () => {
   await run({ github: w2.github, core: w2.core, context: closedEvent(6, ['do not close']), env: { OD_SKIP_LABEL: 'do not close', OD_DRY_RUN: 'true' } });
   assert.deepEqual(w2.st.updates, []);
   assert.deepEqual(w2.st.comments, {});
+});
+
+test('rilascio: chiude le issue fixate solo da descrizioni di PR e toglie "on develop"', async () => {
+  const w = world({
+    issues: {
+      'alanmasu/app#1': open(['on develop']),                        // Fixes in a commit: GitHub closes it
+      'alanmasu/app#2': open(['on develop']),                        // only in the PR description
+      'alanmasu/app#3': { state: 'closed', labels: ['on develop'] }, // already closed
+      'alanmasu/app#4': open(['do not close']),
+    },
+    prs: { 20: { number: 20, merge_commit_sha: 'm'.repeat(40), body: 'Closes #2\n\n<!-- Fixes #9 -->' } },
+    compare: [
+      { sha: 'a'.repeat(40), message: 'fix: one\n\nFixes #1, fixes #3, fixes #4' },
+      { sha: 'm'.repeat(40), message: 'Merge pull request #20 from alanmasu/fix/2', parents: 2 },
+    ],
+  });
+  const ctx = push('main', { after: 'f'.repeat(40) });
+  await run({ github: w.github, core: w.core, context: ctx, env: { OD_SKIP_LABEL: 'do not close' } });
+  assert.deepEqual(w.st.released, ['alanmasu/app#2']);
+  assert.equal(w.st.issues['alanmasu/app#2'].state, 'closed');
+  assert.match(w.st.comments[2][0].body, /fixed by pull request #20 and released to `main` in fffffff/);
+  assert.equal(w.st.issues['alanmasu/app#1'].state, 'open'); // left to GitHub
+  for (const n of [1, 2, 3]) assert.deepEqual(w.st.issues[`alanmasu/app#${n}`].labels, [], `#${n}`);
+  assert.deepEqual(w.st.issues['alanmasu/app#4'].labels, ['do not close']);
+  assert.equal(w.st.issues['alanmasu/app#4'].state, 'open');
+});
+
+test('rilascio: release-cleanup disattivato non tocca nulla', async () => {
+  const w = world({ issues: { 'alanmasu/app#1': open(['on develop']) }, compare: [{ sha: 'a'.repeat(40), message: 'fixes #1' }] });
+  await run({ github: w.github, core: w.core, context: push('main'), env: { OD_RELEASE_CLEANUP: 'false' } });
+  assert.deepEqual(w.st.issues['alanmasu/app#1'].labels, ['on develop']);
+});
+
+test('fix annullato: issue chiusa dal commit al rilascio viene riaperta', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#25': { state: 'closed', labels: [] } },
+    commits: { abcdef1: { message: 'fix: x\n\nFixes #25' } },
+  });
+  w.st.closer[25] = { __typename: 'Commit', abbreviatedOid: 'abcdef1', oid: 'abcdef1' };
+  w.st.compareBy = { 'abcdef1...main': [
+    { sha: 'b'.repeat(40), message: 'chore: unrelated' },
+    { sha: 'r'.repeat(40), message: 'Revert "fix: x"\n\nThis reverts commit abcdef1.' },
+  ] };
+  const p = projectOctokit({ inProject: ['25'] });
+  await run({ github: w.github, core: w.core, context: closedEvent(25, []), getOctokit: p.getOctokit,
+    env: { ...projEnv({ OD_STATUS_ON_DEVELOP: '', OD_STATUS_ON_REVERT: 'In progress' }) } });
+  assert.deepEqual(w.st.updates, ['25:open']);
+  assert.match(w.st.comments[25][0].body, /closed by commit abcdef1, but that fix was reverted by commit rrrrrrr/);
+  assert.deepEqual(p.calls, ['token:pat', 'item-node-25 F1=o-prog']);
+});
+
+test('fix non annullato, chiusa da PR o a mano, opzione spenta: resta chiusa', async () => {
+  const w = world({ issues: { 'alanmasu/app#25': { state: 'closed', labels: [] } } });
+  w.st.closer[25] = { __typename: 'Commit', abbreviatedOid: 'abcdef1', oid: 'abcdef1' };
+  w.st.compareBy = { 'abcdef1...main': [{ sha: 'b'.repeat(40), message: 'chore: unrelated' }] };
+  await run({ github: w.github, core: w.core, context: closedEvent(25, []), env: {} });
+  w.st.closer[25] = { __typename: 'PullRequest', number: 12 };
+  await run({ github: w.github, core: w.core, context: closedEvent(25, []), env: {} });
+  w.st.closer[25] = null;
+  await run({ github: w.github, core: w.core, context: closedEvent(25, []), env: {} });
+  w.st.closer[25] = { __typename: 'Commit', abbreviatedOid: 'abcdef1', oid: 'abcdef1' };
+  w.st.compareBy = { 'abcdef1...main': [{ sha: 'r'.repeat(40), message: 'Revert "x"\n\nThis reverts commit abcdef1.' }] };
+  await run({ github: w.github, core: w.core, context: closedEvent(25, []), env: { OD_REOPEN_REVERTED: 'false' } });
+  assert.deepEqual(w.st.updates, []);
+  assert.ok(w.logs.some((l) => l.includes('which was not reverted')));
+  assert.ok(w.logs.some((l) => l.includes('was not closed by a commit')));
 });
