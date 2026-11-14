@@ -399,7 +399,7 @@ test('fix non annullato, chiusa da PR o a mano, opzione spenta: resta chiusa', a
   w.st.compareBy = { 'abcdef1...main': [{ sha: 'r'.repeat(40), message: 'Revert "x"\n\nThis reverts commit abcdef1.' }] };
   await run({ github: w.github, core: w.core, context: closedEvent(25, []), env: { OD_REOPEN_REVERTED: 'false' } });
   assert.deepEqual(w.st.updates, []);
-  assert.ok(w.logs.some((l) => l.includes('which was not reverted')));
+  assert.ok(w.logs.some((l) => l.includes('a fix for it is still in place')));
   assert.ok(w.logs.some((l) => l.includes('was not closed by a commit')));
 });
 

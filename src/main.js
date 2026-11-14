@@ -432,7 +432,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     } catch (e) {
       return core.warning(`${where}: cannot check whether its fix was reverted (${e.message}): left closed.`);
     }
-    if (!reverter) return core.info(`${where} was closed by ${closer.text}, which was not reverted: left closed.`);
+    if (!reverter) return core.info(`${where} was closed by ${closer.text} and a fix for it is still in place: left closed.`);
     try {
       await reopenWith(issue, where, revertedText({ closer: closer.text, reverter }));
     } catch (e) {
