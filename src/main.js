@@ -468,8 +468,18 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
   // ------------------------------------------------- release (default branch)
   async function handleRelease(branch) {
     const after = String(context.payload.after || '').slice(0, 7);
+    // per issue: the last trusted effect decides whether to close; untrusted effects (descriptions
+    // edited after the merge) can neither cause nor prevent a close, and only clean up the label
+    // when there is no trusted effect at all
     const rel = new Map();
-    const put = (list, source) => { for (const e of list) rel.set(e.ref.key, { ...e, source }); };
+    const put = (list, source) => {
+      for (const e of list) {
+        const cur = rel.get(e.ref.key) || { ref: e.ref, trusted: null, untrusted: null };
+        if (e.untrusted) cur.untrusted = { action: e.action, source };
+        else cur.trusted = { action: e.action, source };
+        rel.set(e.ref.key, cur);
+      }
+    };
     // GitHub closes an issue when a closing keyword appears anywhere in a commit message that
     // reaches the default branch (revert subjects included); the action closes the others
     const githubCloses = new Set();
@@ -483,8 +493,11 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     }
     const released = [];
     const cleaned = [];
-    for (const { ref, action, source, untrusted } of rel.values()) {
-      if (action !== 'add') continue;
+    for (const { ref, trusted, untrusted } of rel.values()) {
+      const decisive = trusted || untrusted;
+      if (decisive.action !== 'add') continue;
+      const canClose = Boolean(trusted);
+      const { source } = decisive;
       const where = `${ref.owner}/${ref.repo}#${ref.number}`;
       let issue;
       try {
@@ -500,7 +513,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
         // and manual links of pull requests merged into develop are not, so close those here
         // only issues GitHub does not close by itself, and only if they still have the label: a
         // pull request description can be edited after the merge, so it is not trusted on its own
-        if (issue.state === 'open' && !untrusted && !githubCloses.has(ref.key) && labelNamed(issue, opts.label)) {
+        if (issue.state === 'open' && canClose && !githubCloses.has(ref.key) && labelNamed(issue, opts.label)) {
           if (!opts.dryRun) {
             await github.rest.issues.update({ owner: ref.owner, repo: ref.repo, issue_number: ref.number, state: 'closed', state_reason: 'completed' });
             await github.rest.issues.createComment({
