@@ -30,13 +30,29 @@ When `develop` is merged into the default branch (needs `main` in the `push` bra
 - the label is **removed** from every released issue;
 - issues fixed only by a **pull request description** (`Closes #12` in a pull request merged into
   `develop`) are **closed** with a comment: GitHub does not close them, because that pull request
-  did not target the default branch;
+  did not target the default branch. Only issues that still have the label are closed: a
+  description can be edited after the merge, so it is never trusted on its own;
 - issues that GitHub closes because a commit with `Fixes #N` reached the default branch, but
   whose fix had been **reverted**, are **reopened** with a comment (needs the `issues: [closed]`
   trigger).
 
 Only the commits of that push are considered, so a hotfix pushed to the default branch does not
-touch issues that are still waiting on `develop`.
+touch issues that are still waiting on `develop`. A **forced** push to the default branch skips
+the cleanup, with a warning.
+
+### Known limits
+
+- Reverts are recognized by git's default message (`This reverts commit <sha>`); a revert whose
+  message was rewritten by hand is not.
+- In pull request descriptions, code (fenced, indented or inline) and HTML comments are ignored.
+  When in doubt the action ignores more than GitHub would: a missed label is safer than a wrong
+  closure.
+- If `develop` is **squash-merged** into the default branch, the pull request merge commits never
+  reach it, so issues fixed only by pull request descriptions are not closed at release.
+- Very large pushes are checked up to 3000 commits; the first push of a new branch only sees the
+  commits listed in the push event. Both cases are reported as warnings.
+- A push and a `pull_request_target` run for the same merge may, rarely, both post the
+  `do not close` warning comment.
 
 ### Issues labeled `do not close`
 

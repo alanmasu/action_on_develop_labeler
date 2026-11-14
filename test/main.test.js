@@ -383,7 +383,7 @@ test('fix annullato: issue chiusa dal commit al rilascio viene riaperta', async 
 });
 
 test('fix non annullato, chiusa da PR o a mano, opzione spenta: resta chiusa', async () => {
-  const w = world({ issues: { 'alanmasu/app#25': { state: 'closed', labels: [] } } });
+  const w = world({ issues: { 'alanmasu/app#25': { state: 'closed', labels: [] } }, commits: { abcdef1: { message: 'fix: x\n\nFixes #25' } } });
   w.st.closer[25] = { __typename: 'Commit', abbreviatedOid: 'abcdef1', oid: 'abcdef1' };
   w.st.compareBy = { 'abcdef1...main': [{ sha: 'b'.repeat(40), message: 'chore: unrelated' }] };
   await run({ github: w.github, core: w.core, context: closedEvent(25, []), env: {} });
@@ -397,4 +397,97 @@ test('fix non annullato, chiusa da PR o a mano, opzione spenta: resta chiusa', a
   assert.deepEqual(w.st.updates, []);
   assert.ok(w.logs.some((l) => l.includes('which was not reverted')));
   assert.ok(w.logs.some((l) => l.includes('was not closed by a commit')));
+});
+
+// ---------------------------------------------------------------- review findings
+
+test('review 1: rilascio non chiude issue senza "on develop" anche se la descrizione della PR le cita', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#1': open([]), 'alanmasu/app#2': open(['on develop']) },
+    prs: { 20: { number: 20, merge_commit_sha: 'm'.repeat(40), body: 'Fixes #1\nFixes #2' } },
+    compare: [{ sha: 'm'.repeat(40), message: 'Merge pull request #20 from x/y', parents: 2 }],
+  });
+  await run({ github: w.github, core: w.core, context: push('main', { after: 'f'.repeat(40) }), env: {} });
+  assert.equal(w.st.issues['alanmasu/app#1'].state, 'open');
+  assert.equal(w.st.issues['alanmasu/app#2'].state, 'closed');
+});
+
+test('review 2: revert di una PR che conteneva fix e revert non resuscita il fix', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#5': open([]) },
+    commits: { abcdef1: { message: 'Fix crash, fixes #5' } },
+    prs: {
+      10: { number: 10, body: 'stuff', commits: ['Fix crash, fixes #5', 'Revert "Fix crash, fixes #5"\n\nThis reverts commit abcdef1.'] },
+    },
+  });
+  await run({ github: w.github, core: w.core, context: prEvent({ number: 11, body: 'Reverts alanmasu/app#10' }), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#5'].labels, []);
+  assert.deepEqual(w.st.labeled, []);
+});
+
+test('review 3: issue chiusa dal commit di revert stesso viene riaperta', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#5': { state: 'closed', labels: [] } },
+    commits: {
+      abcdef1: { message: 'Fix crash, fixes #5' },
+      fedcba9: { message: 'Revert "Fix crash, fixes #5"\n\nThis reverts commit abcdef1.' },
+    },
+  });
+  w.st.closer[5] = { __typename: 'Commit', abbreviatedOid: 'fedcba9', oid: 'fedcba9' };
+  w.st.compareBy = { 'fedcba9...main': [] };
+  await run({ github: w.github, core: w.core, context: closedEvent(5, []), env: {} });
+  assert.deepEqual(w.st.updates, ['5:open']);
+  assert.match(w.st.comments[5][0].body, /reverted by commit fedcba9/);
+});
+
+test('review 4: codice indentato e fence nelle liste sono ignorati nelle descrizioni', async () => {
+  const w = world({ issues: { 'alanmasu/app#5': open(), 'alanmasu/app#6': open(), 'alanmasu/app#7': open() } });
+  await run({ github: w.github, core: w.core, env: {},
+    context: prEvent({ number: 31, body: 'Text\n\n    Fixes #5\n\n- item\n  ```\n  Fixes #6\n  ```\n\nCloses #7' }) });
+  assert.deepEqual(w.st.labeled, ['alanmasu/app#7']);
+});
+
+test('review 5: messaggio squash con revert e nuovi fix', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#5': open(['on develop']), 'alanmasu/app#7': open(), 'alanmasu/app#8': open(['on develop']) },
+    commits: { abc1234: { message: 'fix: old, fixes #8' }, abcdef1: { message: 'fix: crash, fixes #5' } },
+    compare: [{ sha: 's'.repeat(40), message: 'feat: squash (#40)\n\n* Revert "fix: old, fixes #8"\n\nThis reverts commit abc1234.\n\n* closes #7\n\n* Revert "fix: crash, fixes #5"\n\nThis reverts commit abcdef1.\n\n* fix crash again, fixes #5' }],
+  });
+  await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#7'].labels, ['on develop']); // new fix in the squash
+  assert.deepEqual(w.st.issues['alanmasu/app#8'].labels, []);              // reverted
+  assert.deepEqual(w.st.issues['alanmasu/app#5'].labels, ['on develop']); // reverted, then fixed again
+});
+
+test('review 6: push forzato sul branch di default salta la pulizia', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#2': open(['on develop']) },
+    prs: { 20: { number: 20, merge_commit_sha: 'm'.repeat(40), body: 'Closes #2' } },
+    compare: [{ sha: 'm'.repeat(40), message: 'Merge pull request #20 from x/y', parents: 2 }],
+  });
+  await run({ github: w.github, core: w.core, context: push('main', { forced: true }), env: {} });
+  assert.equal(w.st.issues['alanmasu/app#2'].state, 'open');
+  assert.ok(w.logs.some((l) => l.startsWith('WARN Forced push')));
+});
+
+test('review 7: errore nel controllo del revert non fa fallire il run', async () => {
+  const w = world({ issues: { 'alanmasu/app#5': { state: 'closed', labels: [] } } }); // closer commit unknown -> 404
+  w.st.closer[5] = { __typename: 'Commit', abbreviatedOid: '1234567', oid: '1234567' };
+  await run({ github: w.github, core: w.core, context: closedEvent(5, []), env: {} });
+  assert.deepEqual(w.st.updates, []);
+  assert.ok(w.logs.some((l) => l.includes('cannot check whether its fix was reverted')));
+});
+
+test('review 8: "Reverts other/repo#N" legge i dati della PR giusta', async () => {
+  const w = world({ issues: { 'other/lib#3': open(['on develop']) } });
+  const seen = [];
+  w.github.rest.pulls.get = async ({ owner, repo, pull_number }) => {
+    seen.push(`get ${owner}/${repo}#${pull_number}`);
+    return { data: { number: pull_number, body: 'Closes #3', base: { repo: { owner: { login: owner }, name: repo } } } };
+  };
+  const origGraphql = w.github.graphql;
+  w.github.graphql = async (q, v) => { if (q.includes('closingIssuesReferences')) seen.push(`links ${v.owner}/${v.repo}#${v.n}`); return origGraphql(q, v); };
+  await run({ github: w.github, core: w.core, context: prEvent({ number: 50, body: 'Reverts other/lib#9' }), env: {} });
+  assert.ok(seen.includes('get other/lib#9') && seen.includes('links other/lib#9'), seen.join(', '));
+  assert.deepEqual(w.st.unlabeled, ['other/lib#3']); // "#3" is resolved in other/lib, not alanmasu/app
 });

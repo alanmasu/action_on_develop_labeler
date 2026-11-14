@@ -33,12 +33,41 @@ const REF_RE = new RegExp(
 const REVERT_RE = /This reverts commit ([0-9a-f]{7,40})/i;
 const PR_REVERT_RE = new RegExp(`^Reverts (?:(${NAME})/(${NAME}))?#(\\d+)`, 'im');
 
-/** Removes the parts of a markdown text that GitHub ignores. */
+/**
+ * Removes the parts of a markdown text that GitHub ignores: HTML comments, fenced code
+ * (also indented, e.g. inside list items), indented code blocks and inline code.
+ * When in doubt it removes more: a missed reference is safer than a wrong closure.
+ */
 function stripIgnored(text) {
   return String(text || '')
-    .replace(/<!--[\s\S]*?-->/g, ' ')                 // HTML comments (common in PR templates)
-    .replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, ' ') // code blocks
-    .replace(/`[^`\n]*`/g, ' ');                       // inline code
+    .replace(/\r\n?/g, '\n')
+    .replace(/<!--[\s\S]*?-->/g, ' ')                                   // HTML comments
+    .replace(/^[ \t]*(`{3,}|~{3,})[^\n]*\n[\s\S]*?(?:^[ \t]*\1[ \t]*$|(?![\s\S]))/gm, ' ') // fences, unclosed too
+    .replace(/^(?: {4,}|\t).*$/gm, ' ')                                   // indented code
+    .replace(/(`+)[^`]*?\1/g, ' ');                                      // inline code
+}
+
+const REVERT_SUBJECT_RE = /^\s*(?:[*-]\s+)?Revert ".*"\s*$/;
+const REVERT_LINE_RE = /This reverts commit ([0-9a-f]{7,40})/i;
+
+/**
+ * Splits a commit message into ordered tokens: { revert: sha } for every
+ * "This reverts commit <sha>" line, and { text } for everything else. The quoted subject of a
+ * revert (Revert "Fix crash, fixes #5") is dropped: it repeats the keywords of the reverted
+ * commit and must not count as a new fix.
+ */
+function messageTokens(message) {
+  const tokens = [];
+  let buf = [];
+  const flush = () => { if (buf.length) { tokens.push({ text: buf.join('\n') }); buf = []; } };
+  for (const line of String(message || '').split(/\r?\n/)) {
+    const m = REVERT_LINE_RE.exec(line);
+    if (m) { flush(); tokens.push({ revert: m[1] }); continue; }
+    if (REVERT_SUBJECT_RE.test(line)) continue;
+    buf.push(line);
+  }
+  flush();
+  return tokens;
 }
 
 /**
@@ -83,4 +112,4 @@ function refKey({ owner, repo, number }) {
   return `${owner.toLowerCase()}/${repo.toLowerCase()}#${number}`;
 }
 
-module.exports = { parseClosingRefs, revertedSha, revertedPr, refKey, stripIgnored };
+module.exports = { parseClosingRefs, revertedSha, revertedPr, refKey, stripIgnored, messageTokens };
