@@ -102,7 +102,14 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     return out;
   }
 
-  /** Like effectsOfMessage but from a SHA; merge commits include the whole pull request. */
+  /**
+   * Could this commit be the result of merging a pull request? Merge commits, and squash commits
+   * whose subject ends with GitHub's " (#N)". Only these are looked up, to save API calls.
+   */
+  const mayBePrMerge = (parents, message) =>
+    parents > 1 || /\(#\d+\)\s*$/.test(String(message || '').split('\n')[0]);
+
+  /** Like effectsOfMessage but from a SHA; pull request merges include the pull request. */
   async function effectsOfSha(sha, depth, where = current) {
     let data;
     try {
@@ -111,11 +118,15 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
       core.warning(`Commit ${sha.slice(0, 7)} reverted by a revert commit not found: ${e.message}`);
       return [];
     }
-    const out = await effectsOfMessage(data.commit.message, depth, where);
-    if ((data.parents || []).length > 1 && !revertedSha(data.commit.message)) {
-      // revert of a merge commit: undoes everything the pull request brought in
+    const parents = (data.parents || []).length;
+    const out = parents > 1 ? [] : await effectsOfMessage(data.commit.message, depth, where);
+    if (mayBePrMerge(parents, data.commit.message) && !revertedSha(data.commit.message)) {
+      // reverting a pull request merge undoes everything the pull request brought in: a merge
+      // commit brings its commits; a squash commit already carries them in its own message
       const pr = await prMergedBy(data.sha, where);
-      if (pr) out.push(...(await effectsOfPr(pr, depth)));
+      if (pr) out.push(...(await effectsOfPr(pr, depth, { includeCommits: parents > 1 })));
+    } else if (parents > 1) {
+      out.push(...(await effectsOfMessage(data.commit.message, depth, where)));
     }
     return out;
   }
@@ -149,8 +160,8 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
         return [];
       }
     }
-    const out = parseClosingRefs(pr.body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' }));
-    out.push(...(await manualLinks(pr, where)));
+    // same order as a push run: the commits first, then the description and links
+    const out = [];
     if (includeCommits) {
       try {
         const commits = await github.paginate(github.rest.pulls.listCommits, { ...where, pull_number: pr.number, per_page: 100 });
@@ -159,6 +170,8 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
         core.warning(`Cannot read the commits of pull request #${pr.number}: ${e.message}`);
       }
     }
+    out.push(...parseClosingRefs(pr.body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })));
+    out.push(...(await manualLinks(pr, where)));
     return out;
   }
 
@@ -229,7 +242,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
       record(await effectsOfMessage(c.message, 0), `commit ${c.sha.slice(0, 7)}`);
       // a pull request merge: its description and links come after its commits, exactly as in
       // the pull_request_target run, so both runs reach the same result whichever ends last
-      if (c.parents > 1 && !revertedSha(c.message)) {
+      if (mayBePrMerge(c.parents, c.message) && !revertedSha(c.message)) {
         const pr = await prMergedBy(c.sha);
         if (pr) record(await effectsOfPr(pr, 0, { includeCommits: false }), `pull request #${pr.number}`);
       }
@@ -266,31 +279,76 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
   }
 
   /**
-   * Was the fix in commit `sha` for issue `number` reverted later on the default branch?
-   * Returns the short SHA of the commit that undid it, or null.
+   * Was the fix in commit `closerSha` for issue `number` reverted later on the default branch?
+   * Only reverts of the closer itself, or of a pull request merge that contains it, count; a revert
+   * of the revert re-applies it, and a new fix for the issue after a revert means it is fixed
+   * again. Returns the short SHA of the commit that undid it, or null.
    */
-  async function revertedOnDefault(sha, number) {
+  async function revertedOnDefault(closerSha, number) {
     const key = `${current.owner}/${current.repo}#${number}`.toLowerCase();
-    let state = 'add';
+    const same = (a, b) => a.startsWith(b) || b.startsWith(a);
+    const inSet = (set, sha) => [...set].some((x) => same(x, sha));
+    const applied = new Set([closerSha]); // commits whose content includes the fix
+    const reverts = new Set();             // commits that undid it
+    const containsCache = new Map();
+    let state = 'applied';
     let by = null;
+
+    /** Is `sha` the merge (or squash) of a pull request that contains the closer? */
+    async function mergeContainsCloser(sha) {
+      if (containsCache.has(sha)) return containsCache.get(sha);
+      let result = false;
+      try {
+        const { data } = await github.rest.repos.getCommit({ ...current, ref: sha });
+        if (mayBePrMerge((data.parents || []).length, data.commit.message)) {
+          const pr = await prMergedBy(data.sha);
+          if (pr) {
+            const commits = await github.paginate(github.rest.pulls.listCommits, { ...current, pull_number: pr.number, per_page: 100 });
+            result = commits.some((c) => same(c.sha, closerSha));
+          }
+        }
+      } catch {
+        result = false;
+      }
+      containsCache.set(sha, result);
+      return result;
+    }
+
+    async function onRevert(target, commitSha) {
+      if (inSet(reverts, target)) { state = 'applied'; applied.add(commitSha); return; }
+      if (inSet(applied, target) || (await mergeContainsCloser(target))) {
+        state = 'reverted'; by = commitSha.slice(0, 7); reverts.add(commitSha);
+      }
+    }
+
     // the closer can be the revert itself: git's revert subject repeats the keywords
     // (Revert "Fix crash, fixes #5") and GitHub closes the issue because of it
-    const { data: closerCommit } = await github.rest.repos.getCommit({ ...current, ref: sha });
-    for (const e of await effectsOfMessage(closerCommit.commit.message, 0)) {
-      if (e.ref.key === key) { state = e.action; by = sha.slice(0, 7); }
+    const { data: closer } = await github.rest.repos.getCommit({ ...current, ref: closerSha });
+    for (const e of await effectsOfMessage(closer.commit.message, 0)) {
+      if (e.ref.key === key && e.action === 'remove') { state = 'reverted'; by = closerSha.slice(0, 7); reverts.add(closerSha); }
     }
+
     for (let page = 1; page <= MAX_COMPARE_PAGES; page++) {
       const { data } = await github.rest.repos.compareCommitsWithBasehead({
-        ...current, basehead: `${sha}...${defaultBranch}`, per_page: 100, page,
+        ...current, basehead: `${closerSha}...${defaultBranch}`, per_page: 100, page,
       });
       for (const c of data.commits) {
-        for (const e of await effectsOfMessage(c.commit.message, 0)) {
-          if (e.ref.key === key) { state = e.action; by = c.sha.slice(0, 7); }
+        for (const t of messageTokens(c.commit.message)) {
+          if (t.revert) await onRevert(t.revert, c.sha);
+          else if (state === 'reverted' && parseClosingRefs(t.text, current).some((r) => r.key === key)) state = 'applied';
+        }
+        // fixed again by the description of a pull request merged after the revert
+        if (state === 'reverted' && mayBePrMerge((c.parents || []).length, c.commit.message)) {
+          const pr = await prMergedBy(c.sha);
+          if (pr && !revertedPr(pr.body, current)) {
+            const fx = await effectsOfPr(pr, 0, { includeCommits: false });
+            if (fx.some((e) => e.ref.key === key && e.action === 'add')) state = 'applied';
+          }
         }
       }
       if (data.commits.length < 100) break;
     }
-    return state === 'remove' ? by : null;
+    return state === 'reverted' ? by : null;
   }
 
   // ------------------------------------------------------------- closed issue
@@ -350,7 +408,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     const put = (list, source) => { for (const e of list) rel.set(e.ref.key, { ...e, source }); };
     for (const c of await pushedCommits()) {
       put(await effectsOfMessage(c.message, 0), `commit ${c.sha.slice(0, 7)}`);
-      if (c.parents > 1 && !revertedSha(c.message)) {
+      if (mayBePrMerge(c.parents, c.message) && !revertedSha(c.message)) {
         const pr = await prMergedBy(c.sha);
         if (pr) put(await effectsOfPr(pr, 0, { includeCommits: false }), `pull request #${pr.number}`);
       }
