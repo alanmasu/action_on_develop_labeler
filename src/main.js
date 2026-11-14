@@ -2,6 +2,7 @@
 
 const { parseClosingRefs, revertedSha, revertedPr } = require('./parse');
 const { openProject, tokenHint } = require('./project');
+const { MARK_WARN, warnText, reopenText, hasMarker, findCloser } = require('./skip');
 
 const MAX_REVERT_DEPTH = 5;
 const MAX_COMPARE_PAGES = 30;
@@ -22,28 +23,32 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     statusField: (env.OD_STATUS_FIELD || 'Status').trim(),
     statusOnDevelop: (env.OD_STATUS_ON_DEVELOP || '').trim(),
     statusOnRevert: (env.OD_STATUS_ON_REVERT || '').trim(),
+    statusOnReopen: (env.OD_STATUS_ON_REOPEN || '').trim(),
+    reopen: !/^(0|false|no)$/i.test(env.OD_REOPEN_SKIPPED || 'true'),
+    warn: !/^(0|false|no)$/i.test(env.OD_WARN_SKIPPED || 'true'),
   };
   const current = { owner: context.repo.owner, repo: context.repo.repo };
   // output sempre presenti, anche quando si esce subito (step successivi li confrontano con '[]')
   core.setOutput('labeled', '[]');
   core.setOutput('unlabeled', '[]');
   core.setOutput('skipped', '[]');
+  core.setOutput('reopened', '[]');
 
   // project: validato subito, così un nome sbagliato ferma tutto prima di toccare le issue
   let project = null;
   if (opts.project) {
-    if (!opts.statusOnDevelop && !opts.statusOnRevert) {
-      throw new Error('Con "project-url" serve almeno uno tra "status-on-develop" e "status-on-revert".');
+    if (!opts.statusOnDevelop && !opts.statusOnRevert && !opts.statusOnReopen) {
+      throw new Error('Con "project-url" serve almeno uno tra "status-on-develop", "status-on-revert" e "status-on-reopen".');
     }
     const projectGh = opts.projectToken && getOctokit ? getOctokit(opts.projectToken) : github;
     project = await openProject(projectGh, {
       url: opts.project,
       fieldName: opts.statusField,
-      options: [opts.statusOnDevelop, opts.statusOnRevert],
+      options: [opts.statusOnDevelop, opts.statusOnRevert, opts.statusOnReopen],
     });
     core.info(`Project "${project.title}": ${opts.statusField} -> "${opts.statusOnDevelop || '-'}" / revert -> "${opts.statusOnRevert || '-'}"`);
-  } else if (opts.statusOnDevelop || opts.statusOnRevert) {
-    throw new Error('"status-on-develop" / "status-on-revert" richiedono "project-url".');
+  } else if (opts.statusOnDevelop || opts.statusOnRevert || opts.statusOnReopen) {
+    throw new Error('"status-on-develop" / "status-on-revert" / "status-on-reopen" richiedono "project-url".');
   }
   const defaultBranch = context.payload.repository && context.payload.repository.default_branch;
 
@@ -161,6 +166,11 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
 
   // ------------------------------------------------------------------- eventi
   const event = context.eventName;
+  let targetBranch = '';
+
+  if (event === 'issues') {
+    return handleClosedIssue();
+  }
 
   if (event === 'push') {
     const branch = String(context.ref || '').replace(/^refs\/heads\//, '');
@@ -168,6 +178,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     if (branch === defaultBranch) {
       return core.info(`"${branch}" è il branch di default: le issue le chiude GitHub, niente da fare.`);
     }
+    targetBranch = branch;
     for (const c of await pushedCommits()) {
       record(await effectsOfMessage(c.message, 0), `commit ${c.sha.slice(0, 7)}`);
     }
@@ -175,10 +186,41 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     const pr = context.payload.pull_request;
     if (context.payload.action !== 'closed' || !pr.merged) return core.info('PR non mergiata: niente da fare.');
     if (pr.base.ref === defaultBranch) return core.info('PR verso il branch di default: le issue le chiude GitHub.');
+    targetBranch = pr.base.ref;
     // i commit della PR li gestisce già il trigger "push": qui solo descrizione e link manuali
     record(await effectsOfPr(pr, 0, { includeCommits: false }), `PR #${pr.number}`);
   } else {
-    return core.warning(`Evento "${event}" non gestito: usa push e/o pull_request (closed).`);
+    return core.warning(`Evento "${event}" non gestito: usa push, pull_request_target (closed) e issues (closed).`);
+  }
+
+  // ------------------------------------------------- issue chiusa con skip label
+  async function handleClosedIssue() {
+    const issue = context.payload.issue;
+    if (context.payload.action !== 'closed' || !issue) return core.info('Evento issues diverso da "closed": niente da fare.');
+    const where = `${current.owner}/${current.repo}#${issue.number}`;
+    const labelled = opts.skipLabel && (issue.labels || []).some((l) => (l.name || l).toLowerCase() === opts.skipLabel.toLowerCase());
+    if (!labelled) return core.info(`${where} non ha "${opts.skipLabel}": niente da fare.`);
+    if (!opts.reopen) return core.info(`${where} ha "${opts.skipLabel}" ma "reopen-skipped" è disattivato.`);
+    if (issue.pull_request) return core.info(`${where} è una pull request: ignorata.`);
+    const closer = await findCloser(github, { ...current, number: issue.number });
+    if (!closer) return core.info(`${where} è stata chiusa a mano: resta chiusa.`);
+    if (!opts.dryRun) {
+      await github.rest.issues.update({ ...current, issue_number: issue.number, state: 'open' });
+      await github.rest.issues.createComment({
+        ...current, issue_number: issue.number, body: reopenText({ skipLabel: opts.skipLabel, closer }),
+      });
+    }
+    core.warning(`${opts.dryRun ? '[dry-run] ' : ''}${where} riaperta: ha "${opts.skipLabel}" ed era stata chiusa da ${closer}.`);
+    if (project && opts.statusOnReopen) {
+      try {
+        const r = await project.setStatus(issue.node_id, opts.statusOnReopen, opts.dryRun);
+        core.info(r === 'missing' ? `${where} non è nel project: Status non toccato.` : `${where}: ${opts.statusField} = "${opts.statusOnReopen}"`);
+      } catch (e) {
+        core.warning(`${where}: Status non aggiornato (${e.message})${tokenHint(e)}`);
+      }
+    }
+    core.setOutput('reopened', JSON.stringify([where]));
+    await core.summary.addHeading('Reopened', 3).addList([`${where} (closed by ${closer})`]).write().catch(() => {});
   }
 
   // ------------------------------------------------------------- applicazione
@@ -229,6 +271,19 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     if (opts.skipLabel && hasLabel(issue, opts.skipLabel)) {
       skipped.push(where);
       core.info(`${where} ha "${opts.skipLabel}": ignorata.`);
+      if (action === 'add' && issue.state === 'open' && opts.warn) {
+        core.warning(`${where} è "${opts.skipLabel}" ma ${source} la chiuderà al rilascio.`);
+        try {
+          if (!(await hasMarker(github, ref, MARK_WARN)) && !opts.dryRun) {
+            await github.rest.issues.createComment({
+              owner: ref.owner, repo: ref.repo, issue_number: ref.number,
+              body: warnText({ skipLabel: opts.skipLabel, source, branch: targetBranch, number: ref.number, reopen: opts.reopen }),
+            });
+          }
+        } catch (e) {
+          core.warning(`${where}: commento di avviso non scritto (${e.message}).`);
+        }
+      }
       continue;
     }
     const has = hasLabel(issue, opts.label);

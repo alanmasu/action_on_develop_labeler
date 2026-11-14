@@ -6,7 +6,7 @@ const run = require('../src/main');
 const err = (status) => Object.assign(new Error(`HTTP ${status}`), { status });
 
 function world({ issues = {}, commits = {}, prs = {}, compare = [], repoLabels = [] } = {}) {
-  const st = { issues: structuredClone(issues), repoLabels: new Set(repoLabels), created: [] };
+  const st = { issues: structuredClone(issues), repoLabels: new Set(repoLabels), created: [], comments: {}, updates: [], closer: {}, events: {}, graphqlDown: false };
   const issueOf = (o, r, n) => st.issues[`${o}/${r}#${n}`.toLowerCase()];
   const github = {
     rest: {
@@ -22,6 +22,10 @@ function world({ issues = {}, commits = {}, prs = {}, compare = [], repoLabels =
         },
         createLabel: async ({ owner, repo, name }) => { st.repoLabels.add(`${owner}/${repo}:${name}`); st.created.push(`${owner}/${repo}`); },
         addLabels: async ({ owner, repo, issue_number, labels }) => { issueOf(owner, repo, issue_number).labels.push(...labels); },
+        listComments: 'listComments',
+        listEvents: 'listEvents',
+        createComment: async ({ issue_number, body }) => { (st.comments[issue_number] ||= []).push({ body }); },
+        update: async ({ owner, repo, issue_number, state }) => { issueOf(owner, repo, issue_number).state = state; st.updates.push(`${issue_number}:${state}`); },
         removeLabel: async ({ owner, repo, issue_number, name }) => {
           const i = issueOf(owner, repo, issue_number);
           i.labels = i.labels.filter((l) => l !== name);
@@ -45,9 +49,19 @@ function world({ issues = {}, commits = {}, prs = {}, compare = [], repoLabels =
         listCommits: 'listCommits',
       },
     },
-    paginate: async (fn, { pull_number }) =>
-      (prs[pull_number].commits || []).map((message) => ({ commit: { message } })),
-    graphql: async () => ({ repository: { pullRequest: { closingIssuesReferences: { nodes: [] } } } }),
+    paginate: async (fn, args) => {
+      if (fn === 'listComments') return st.comments[args.issue_number] || [];
+      if (fn === 'listEvents') return st.events[args.issue_number] || [];
+      return (prs[args.pull_number].commits || []).map((message) => ({ commit: { message } }));
+    },
+    graphql: async (q, v) => {
+      if (q.includes('timelineItems')) {
+        if (st.graphqlDown) throw new Error('graphql down');
+        const c = st.closer[v.n];
+        return { repository: { issue: { timelineItems: { nodes: [{ closer: c || null }] } } } };
+      }
+      return { repository: { pullRequest: { closingIssuesReferences: { nodes: [] } } } };
+    },
   };
   const logs = [];
   const core = {
@@ -239,4 +253,81 @@ test('revert concorrente: label già tolta non è un errore', async () => {
   await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
   assert.ok(!w.logs.some((l) => l.startsWith('WARN')));
   assert.deepEqual(w.st.unlabeled, ['alanmasu/app#1']);
+});
+
+const closedEvent = (number, labels) => ({
+  eventName: 'issues', ref: '', repo: repoCtx,
+  payload: { action: 'closed', repository: { default_branch: 'main' },
+    issue: { number, node_id: `node-${number}`, labels: labels.map((name) => ({ name })) } },
+});
+
+test('avviso: commento una sola volta quando un Fixes arriva su una issue "do not close"', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#6': open(['do not close']) },
+    compare: [{ sha: 'a'.repeat(40), message: 'fixes #6' }],
+  });
+  const env = { OD_SKIP_LABEL: 'do not close' };
+  await run({ github: w.github, core: w.core, context: push('develop'), env });
+  await run({ github: w.github, core: w.core, context: push('develop'), env });
+  assert.equal(w.st.comments[6].length, 1);
+  assert.match(w.st.comments[6][0].body, /commit aaaaaaa on `develop`.*\n.*reopened automatically/);
+  assert.match(w.st.comments[6][0].body, /Use `Refs #6` instead of `Fixes #6`/);
+  assert.ok(w.logs.some((l) => l.startsWith('WARN') && l.includes('#6')));
+});
+
+test('avviso disattivato o issue chiusa: nessun commento', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#6': open(['do not close']), 'alanmasu/app#7': { state: 'closed', labels: ['do not close'] } },
+    compare: [{ sha: 'a'.repeat(40), message: 'fixes #6, fixes #7' }],
+  });
+  await run({ github: w.github, core: w.core, context: push('develop'), env: { OD_SKIP_LABEL: 'do not close', OD_WARN_SKIPPED: 'false' } });
+  assert.deepEqual(w.st.comments, {});
+  await run({ github: w.github, core: w.core, context: push('develop'), env: { OD_SKIP_LABEL: 'do not close' } });
+  assert.deepEqual(Object.keys(w.st.comments), ['6']);
+});
+
+test('riapertura: chiusa da commit o da PR -> riaperta con commento', async () => {
+  for (const [closer, text] of [[{ __typename: 'Commit', abbreviatedOid: 'abc1234' }, 'commit abc1234'],
+                                 [{ __typename: 'PullRequest', number: 12 }, 'pull request #12']]) {
+    const w = world({ issues: { 'alanmasu/app#6': { state: 'closed', labels: ['do not close'] } } });
+    w.st.closer[6] = closer;
+    await run({ github: w.github, core: w.core, context: closedEvent(6, ['do not close']), env: { OD_SKIP_LABEL: 'do not close' } });
+    assert.deepEqual(w.st.updates, ['6:open']);
+    assert.match(w.st.comments[6][0].body, new RegExp(`closed by ${text}\\.`));
+    assert.deepEqual(w.st.reopened, ['alanmasu/app#6']);
+  }
+});
+
+test('riapertura: chiusa a mano, senza label o disattivata -> resta chiusa', async () => {
+  const w = world({ issues: { 'alanmasu/app#6': { state: 'closed', labels: ['do not close'] }, 'alanmasu/app#7': { state: 'closed', labels: [] } } });
+  await run({ github: w.github, core: w.core, context: closedEvent(6, ['do not close']), env: { OD_SKIP_LABEL: 'do not close' } });
+  w.st.closer[7] = { __typename: 'Commit', abbreviatedOid: 'abc1234' };
+  await run({ github: w.github, core: w.core, context: closedEvent(7, []), env: { OD_SKIP_LABEL: 'do not close' } });
+  w.st.closer[6] = { __typename: 'Commit', abbreviatedOid: 'abc1234' };
+  await run({ github: w.github, core: w.core, context: closedEvent(6, ['do not close']), env: { OD_SKIP_LABEL: 'do not close', OD_REOPEN_SKIPPED: 'false' } });
+  assert.deepEqual(w.st.updates, []);
+  assert.ok(w.logs.some((l) => l.includes('chiusa a mano')));
+});
+
+test('riapertura: fallback REST se GraphQL non risponde', async () => {
+  const w = world({ issues: { 'alanmasu/app#6': { state: 'closed', labels: ['do not close'] } } });
+  w.st.graphqlDown = true;
+  w.st.events[6] = [{ event: 'closed', commit_id: null }, { event: 'reopened' }, { event: 'closed', commit_id: 'c7479a1d59e7' }];
+  await run({ github: w.github, core: w.core, context: closedEvent(6, ['do not close']), env: { OD_SKIP_LABEL: 'do not close' } });
+  assert.deepEqual(w.st.updates, ['6:open']);
+  assert.match(w.st.comments[6][0].body, /closed by commit c7479a1\./);
+});
+
+test('riapertura: Status nel project e dry-run', async () => {
+  const p = projectOctokit({ inProject: ['6'] });
+  const w = world({ issues: { 'alanmasu/app#6': { state: 'closed', labels: ['do not close'] } } });
+  w.st.closer[6] = { __typename: 'Commit', abbreviatedOid: 'abc1234' };
+  await run({ github: w.github, core: w.core, context: closedEvent(6, ['do not close']), getOctokit: p.getOctokit,
+    env: { ...projEnv({ OD_STATUS_ON_DEVELOP: '', OD_STATUS_ON_REVERT: '', OD_STATUS_ON_REOPEN: 'In progress' }), OD_SKIP_LABEL: 'do not close' } });
+  assert.deepEqual(p.calls, ['token:pat', 'item-node-6 F1=o-prog']);
+  const w2 = world({ issues: { 'alanmasu/app#6': { state: 'closed', labels: ['do not close'] } } });
+  w2.st.closer[6] = { __typename: 'Commit', abbreviatedOid: 'abc1234' };
+  await run({ github: w2.github, core: w2.core, context: closedEvent(6, ['do not close']), env: { OD_SKIP_LABEL: 'do not close', OD_DRY_RUN: 'true' } });
+  assert.deepEqual(w2.st.updates, []);
+  assert.deepEqual(w2.st.comments, {});
 });

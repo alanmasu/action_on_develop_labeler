@@ -9,6 +9,9 @@ on:
   pull_request_target:
     types: [closed]
     branches: [develop]
+  # reopens issues labeled "do not close" when a commit or pull request closes them
+  issues:
+    types: [closed]
 
 permissions:
   contents: read

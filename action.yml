@@ -21,6 +21,16 @@ inputs:
   skip-label:
     description: Issues with this label are ignored (no label, no status change). Empty = disabled.
     default: do not close
+  warn-skipped:
+    description: >
+      When a closing keyword reaches develop for an issue with the skip label, comment once on the
+      issue to warn that GitHub will close it at release.
+    default: "true"
+  reopen-skipped:
+    description: >
+      Reopen issues with the skip label when a commit or pull request closes them (needs the
+      "issues: closed" trigger). Issues closed by hand stay closed.
+    default: "true"
   token:
     description: >
       Token for labels and issues. GITHUB_TOKEN is enough for issues in the same repository;
@@ -45,6 +55,9 @@ inputs:
   status-on-revert:
     description: Option to set when the label is removed by a revert, e.g. "In progress". Empty = leave it.
     default: ""
+  status-on-reopen:
+    description: Option to set when an issue with the skip label is reopened, e.g. "In progress". Empty = leave it.
+    default: ""
   dry-run:
     description: If "true", only report what would change
     default: "false"
@@ -59,6 +72,9 @@ outputs:
   skipped:
     description: Issues ignored because they have the skip label (JSON array)
     value: ${{ steps.run.outputs.skipped }}
+  reopened:
+    description: Issues reopened because they have the skip label (JSON array)
+    value: ${{ steps.run.outputs.reopened }}
 
 runs:
   using: composite
@@ -75,6 +91,9 @@ runs:
         OD_STATUS_FIELD: ${{ inputs.status-field }}
         OD_STATUS_ON_DEVELOP: ${{ inputs.status-on-develop }}
         OD_STATUS_ON_REVERT: ${{ inputs.status-on-revert }}
+        OD_STATUS_ON_REOPEN: ${{ inputs.status-on-reopen }}
+        OD_WARN_SKIPPED: ${{ inputs.warn-skipped }}
+        OD_REOPEN_SKIPPED: ${{ inputs.reopen-skipped }}
         OD_DRY_RUN: ${{ inputs.dry-run }}
         OD_ACTION_PATH: ${{ github.action_path }}
       with:

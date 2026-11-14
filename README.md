@@ -23,6 +23,18 @@ Ignored: closed issues, references to pull requests, issues with the `skip-label
 (default `do not close`), pushes to the default branch, tags. If the label does not exist in the
 repository, it is created.
 
+### Issues labeled `do not close`
+
+GitHub closes an issue when a `Fixes #N` reaches the default branch, whatever its labels. For
+issues with the `skip-label` the action:
+
+1. **warns early**: when a closing keyword for the issue reaches `develop`, it comments once on
+   the issue (and shows a warning in the run) saying that the release will close it;
+2. **reopens it**: when a commit or a pull request closes it, it reopens it and comments with what
+   closed it. Issues **closed by hand stay closed**. Needs the `issues: [closed]` trigger.
+
+Remove the label by hand when the issue is actually solved.
+
 Use `Refs #12` instead of `Fixes #12` for partial fixes: it links the issue without closing it.
 
 ## Usage
@@ -34,6 +46,8 @@ on:
   pull_request_target:
     types: [closed]
     branches: [develop]
+  issues:
+    types: [closed]
 
 permissions:
   contents: read
@@ -55,15 +69,18 @@ Complete examples in [`examples/workflows/`](examples/workflows/).
 | `label-color` | `8521fc` | Used only if the label is created |
 | `label-description` | `Fix merged into develop, waiting for release` | Used only if the label is created |
 | `skip-label` | `do not close` | Issues with this label are ignored. Empty = disabled |
+| `warn-skipped` | `true` | Comment once on skip-labeled issues referenced by a fix on `develop` |
+| `reopen-skipped` | `true` | Reopen skip-labeled issues closed by a commit or pull request |
 | `token` | `github.token` | Needs access to other repositories for `Fixes owner/repo#N` |
 | `project-url` | | Project to update, `https://github.com/users/<user>/projects/<n>` or `.../orgs/<org>/projects/<n>` |
 | `project-token` | | Token with access to the project (`GITHUB_TOKEN` cannot) |
 | `status-field` | `Status` | Single select field to update |
 | `status-on-develop` | | Option set when the label is added |
 | `status-on-revert` | | Option set when a revert removes the label. Empty = leave it |
+| `status-on-reopen` | | Option set when a skip-labeled issue is reopened. Empty = leave it |
 | `dry-run` | `false` | Only report what would change |
 
-Outputs: `labeled`, `unlabeled`, `skipped` (JSON arrays of `owner/repo#N`). Each run also writes a
+Outputs: `labeled`, `unlabeled`, `skipped`, `reopened` (JSON arrays of `owner/repo#N`). Each run also writes a
 summary on the job page.
 
 ### With a project
