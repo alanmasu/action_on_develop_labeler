@@ -247,7 +247,12 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
       } else {
         if (!has) continue;
         if (!opts.dryRun) {
-          await github.rest.issues.removeLabel({ owner: ref.owner, repo: ref.repo, issue_number: ref.number, name: opts.label });
+          try {
+            await github.rest.issues.removeLabel({ owner: ref.owner, repo: ref.repo, issue_number: ref.number, name: opts.label });
+          } catch (e) {
+            // 404 = already removed, e.g. by a concurrent run for the same merge
+            if (e.status !== 404) throw e;
+          }
         }
         unlabeled.push(where);
         if (opts.statusOnRevert) statusQueue.push({ where, nodeId: issue.node_id, option: opts.statusOnRevert });

@@ -228,3 +228,15 @@ test('project: dry-run non sposta nulla', async () => {
   await run({ github: w.github, core: w.core, context: push('develop'), getOctokit: p.getOctokit, env: projEnv({ OD_DRY_RUN: 'true' }) });
   assert.deepEqual(p.calls, ['token:pat']);
 });
+
+test('revert concorrente: label già tolta non è un errore', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#1': open(['on develop']) },
+    commits: { abcdef1: { message: 'fixes #1' } },
+    compare: [{ sha: 'r'.repeat(40), message: 'Revert "fixes #1"\n\nThis reverts commit abcdef1.' }],
+  });
+  w.github.rest.issues.removeLabel = async () => { throw Object.assign(new Error('Label does not exist'), { status: 404 }); };
+  await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
+  assert.ok(!w.logs.some((l) => l.startsWith('WARN')));
+  assert.deepEqual(w.st.unlabeled, ['alanmasu/app#1']);
+});
