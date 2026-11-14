@@ -400,7 +400,8 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
         // fixed again by the description of a pull request merged later
         if (mayBePrMerge((c.parents || []).length, c.commit.message)) {
           const pr = await prMergedBy(c.sha);
-          if (pr && !revertedPr(pr.body, current)) {
+          // read long after the merge: an edited description is not trusted
+          if (pr && (await bodyUnchangedSinceMerge(pr, current)) && !revertedPr(pr.body, current)) {
             const fx = await effectsOfPr(pr, 0, { includeCommits: false });
             if (fx.some((e) => e.ref.key === key && e.action === 'add')) active.add(c.sha);
           }

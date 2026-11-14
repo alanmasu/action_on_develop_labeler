@@ -875,3 +875,26 @@ test('round 4/C bis: due fix, uno solo annullato: resta chiusa', async () => {
   await run({ github: w.github, core: w.core, context: closedEvent(5, []), env: {} });
   assert.deepEqual(w.st.updates, []);
 });
+
+test('round 6/2: controllo dei fix annullati ignora descrizioni modificate dopo il merge', async () => {
+  const mk = () => {
+    const w = world({
+      issues: { 'alanmasu/app#5': { state: 'closed', labels: [] } },
+      commits: { abcdef1: { message: 'Fixes #5' } },
+      prs: { 20: { number: 20, merge_commit_sha: 'c2c2c2c', body: 'Typo\n\nFixes #5' } },
+    });
+    w.st.closer[5] = { __typename: 'Commit', abbreviatedOid: 'abcdef1', oid: 'abcdef1' };
+    w.st.compareBy = { 'abcdef1...main': [
+      { sha: 'dddddd1', message: 'Revert "Fixes #5"\n\nThis reverts commit abcdef1.' },
+      { sha: 'c2c2c2c', message: 'Merge pull request #20 from fork/typo', parents: 2 },
+    ] };
+    return w;
+  };
+  const edited = mk();
+  edited.st.edited = { 20: '2026-02-01T00:00:00Z' };
+  await run({ github: edited.github, core: edited.core, context: closedEvent(5, []), env: {} });
+  assert.deepEqual(edited.st.updates, ['5:open']);
+  const untouched = mk();
+  await run({ github: untouched.github, core: untouched.core, context: closedEvent(5, []), env: {} });
+  assert.deepEqual(untouched.st.updates, []); // a trusted description fixed it again
+});
