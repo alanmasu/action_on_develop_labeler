@@ -1,0 +1,84 @@
+name: On develop labeler
+description: >
+  Adds a label (default "on develop") to issues referenced with GitHub closing keywords
+  (Fixes #N, Closes owner/repo#N, ...) when the fix lands on a branch that is not the default
+  one, removes it when the fix is reverted, and can move the issue in a GitHub Project.
+author: alanmasu
+branding:
+  icon: tag
+  color: green
+
+inputs:
+  label:
+    description: Label to apply
+    default: on develop
+  label-color:
+    description: Hex color (without #) used if the label has to be created
+    default: 8521fc
+  label-description:
+    description: Description used if the label has to be created
+    default: Fix merged into develop, waiting for release
+  skip-label:
+    description: Issues with this label are ignored (no label, no status change). Empty = disabled.
+    default: do not close
+  token:
+    description: >
+      Token for labels and issues. GITHUB_TOKEN is enough for issues in the same repository;
+      "Fixes owner/other-repo#N" needs a token with access to that repository too.
+    default: ${{ github.token }}
+  project-url:
+    description: >
+      Optional. Project whose Status is updated, e.g. https://github.com/users/alanmasu/projects/3
+      or https://github.com/orgs/ThinkEmbedded-dev/projects/1. Only issues already in the project are moved.
+    default: ""
+  project-token:
+    description: >
+      Token with access to the project (GITHUB_TOKEN cannot access projects): classic PAT with
+      "project" scope, fine-grained PAT with Projects read/write, or a GitHub App token.
+    default: ""
+  status-field:
+    description: Single select field to update
+    default: Status
+  status-on-develop:
+    description: Option to set when the label is added, e.g. "On develop"
+    default: ""
+  status-on-revert:
+    description: Option to set when the label is removed by a revert, e.g. "In progress". Empty = leave it.
+    default: ""
+  dry-run:
+    description: If "true", only report what would change
+    default: "false"
+
+outputs:
+  labeled:
+    description: Issues that received the label (JSON array of "owner/repo#N")
+    value: ${{ steps.run.outputs.labeled }}
+  unlabeled:
+    description: Issues whose label was removed because of a revert (JSON array)
+    value: ${{ steps.run.outputs.unlabeled }}
+  skipped:
+    description: Issues ignored because they have the skip label (JSON array)
+    value: ${{ steps.run.outputs.skipped }}
+
+runs:
+  using: composite
+  steps:
+    - id: run
+      uses: actions/github-script@v8
+      env:
+        OD_LABEL: ${{ inputs.label }}
+        OD_LABEL_COLOR: ${{ inputs.label-color }}
+        OD_LABEL_DESCRIPTION: ${{ inputs.label-description }}
+        OD_SKIP_LABEL: ${{ inputs.skip-label }}
+        OD_PROJECT_URL: ${{ inputs.project-url }}
+        OD_PROJECT_TOKEN: ${{ inputs.project-token }}
+        OD_STATUS_FIELD: ${{ inputs.status-field }}
+        OD_STATUS_ON_DEVELOP: ${{ inputs.status-on-develop }}
+        OD_STATUS_ON_REVERT: ${{ inputs.status-on-revert }}
+        OD_DRY_RUN: ${{ inputs.dry-run }}
+        OD_ACTION_PATH: ${{ github.action_path }}
+      with:
+        github-token: ${{ inputs.token }}
+        script: |
+          const run = require(require('path').join(process.env.OD_ACTION_PATH, 'src', 'main.js'));
+          await run({ github, context, core, getOctokit });

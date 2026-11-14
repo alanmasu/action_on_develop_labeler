@@ -1,0 +1,24 @@
+# Copy to .github/workflows/on-develop.yml
+name: On develop
+
+on:
+  push:
+    branches: [develop]
+  # pull_request_target (not pull_request) so it also works for PRs from forks.
+  # The action never checks out PR code, so this is safe.
+  pull_request_target:
+    types: [closed]
+    branches: [develop]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: alanmasu/action_on_develop_labeler@v1
+        # with:
+        #   token: ${{ secrets.ON_DEVELOP_TOKEN || github.token }}  # only for "Fixes other-owner/other-repo#N"

@@ -1,0 +1,10 @@
+{
+  "name": "action_on_develop_labeler",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GitHub Action: label (and project status) for issues fixed on a non-default branch",
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "license": "MIT"
+}

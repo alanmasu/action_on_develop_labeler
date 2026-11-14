@@ -1,0 +1,26 @@
+# Copy to .github/workflows/on-develop.yml (instead of the version without project).
+name: On develop
+
+on:
+  push:
+    branches: [develop]
+  pull_request_target:
+    types: [closed]
+    branches: [develop]
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: alanmasu/action_on_develop_labeler@v1
+        with:
+          project-url: https://github.com/users/alanmasu/projects/1   # change me
+          project-token: ${{ secrets.PROJECT_TOKEN }}
+          status-field: Status                                         # change me
+          status-on-develop: On develop                                # change me
+          status-on-revert: In progress                                # change me, or remove
