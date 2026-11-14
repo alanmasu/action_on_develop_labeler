@@ -80,7 +80,7 @@ runs:
   using: composite
   steps:
     - id: run
-      uses: actions/github-script@v8
+      uses: actions/github-script@v9
       env:
         OD_LABEL: ${{ inputs.label }}
         OD_LABEL_COLOR: ${{ inputs.label-color }}
