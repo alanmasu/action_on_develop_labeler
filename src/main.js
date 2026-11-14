@@ -138,7 +138,12 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
       try {
         const { data: inner } = await github.rest.pulls.get({ owner: rev.owner, repo: rev.repo, pull_number: rev.number });
         if (!inner.base) inner.base = { repo: { owner: { login: rev.owner }, name: rev.repo } };
-        return invert(net(await effectsOfPr(inner, depth + 1)));
+        // the reverted pull request first, then the revert's own keywords and links
+        return [
+          ...invert(net(await effectsOfPr(inner, depth + 1))),
+          ...parseClosingRefs(pr.body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })),
+          ...(await manualLinks(pr, where)),
+        ];
       } catch (e) {
         core.warning(`Reverted pull request ${rev.owner}/${rev.repo}#${rev.number} not found: ${e.message}`);
         return [];
@@ -222,6 +227,12 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     targetBranch = branch;
     for (const c of await pushedCommits()) {
       record(await effectsOfMessage(c.message, 0), `commit ${c.sha.slice(0, 7)}`);
+      // a pull request merge: its description and links come after its commits, exactly as in
+      // the pull_request_target run, so both runs reach the same result whichever ends last
+      if (c.parents > 1 && !revertedSha(c.message)) {
+        const pr = await prMergedBy(c.sha);
+        if (pr) record(await effectsOfPr(pr, 0, { includeCommits: false }), `pull request #${pr.number}`);
+      }
     }
   } else if (event === 'pull_request' || event === 'pull_request_target') {
     const pr = context.payload.pull_request;
@@ -298,7 +309,11 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
         return core.warning(`${where}: cannot find what closed it (${e.message}): left closed.`);
       }
       if (!closer) return core.info(`${where} was closed by hand: left closed.`);
-      await reopenWith(issue, where, reopenText({ skipLabel: opts.skipLabel, closer: closer.text }));
+      try {
+        await reopenWith(issue, where, reopenText({ skipLabel: opts.skipLabel, closer: closer.text }));
+      } catch (e) {
+        return core.warning(`${where}: could not reopen it (${e.message}).`);
+      }
       core.warning(`${opts.dryRun ? '[dry-run] ' : ''}${where} reopened: it has "${opts.skipLabel}" and was closed by ${closer.text}.`);
       await setStatusSafe(where, issue.node_id, opts.statusOnReopen);
       core.setOutput('reopened', JSON.stringify([where]));
@@ -317,7 +332,11 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
       return core.warning(`${where}: cannot check whether its fix was reverted (${e.message}): left closed.`);
     }
     if (!reverter) return core.info(`${where} was closed by ${closer.text}, which was not reverted: left closed.`);
-    await reopenWith(issue, where, revertedText({ closer: closer.text, reverter }));
+    try {
+      await reopenWith(issue, where, revertedText({ closer: closer.text, reverter }));
+    } catch (e) {
+      return core.warning(`${where}: could not reopen it (${e.message}).`);
+    }
     core.warning(`${opts.dryRun ? '[dry-run] ' : ''}${where} reopened: ${closer.text} was reverted by commit ${reverter}.`);
     await setStatusSafe(where, issue.node_id, opts.statusOnRevert);
     core.setOutput('reopened', JSON.stringify([where]));

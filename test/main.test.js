@@ -491,3 +491,69 @@ test('review 8: "Reverts other/repo#N" legge i dati della PR giusta', async () =
   assert.ok(seen.includes('get other/lib#9') && seen.includes('links other/lib#9'), seen.join(', '));
   assert.deepEqual(w.st.unlabeled, ['other/lib#3']); // "#3" is resolved in other/lib, not alanmasu/app
 });
+
+// ------------------------------------------------------- round 2 review findings
+
+test('round 2/1: revert di un revert mergiato con squash ("... (#32)")', async () => {
+  const A = 'a'.repeat(40);
+  const S = 'c'.repeat(40);
+  const w = world({
+    issues: { 'alanmasu/app#5': open() },
+    commits: { [A]: { message: 'Fix crash, fixes #5' }, [S]: { message: `Revert "Fix crash, fixes #5" (#32)\n\nThis reverts commit ${A}.` } },
+    compare: [{ sha: 'd'.repeat(40), message: `Revert "Revert "Fix crash, fixes #5" (#32)"\n\nThis reverts commit ${S}.` }],
+  });
+  await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#5'].labels, ['on develop']);
+});
+
+test('round 2/2: "Reverts #N" in un commento o non in prima riga non è un revert', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#7': open(), 'alanmasu/app#8': open(['on develop']) },
+    prs: { 30: { number: 30, body: 'Closes #8' } },
+  });
+  await run({ github: w.github, core: w.core, context: prEvent({ number: 31, body: 'Closes #7\n\n<!--\nReverts #30\n-->' }), env: {} });
+  await run({ github: w.github, core: w.core, context: prEvent({ number: 32, body: 'Some text\n\nReverts #30' }), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#7'].labels, ['on develop']);
+  assert.deepEqual(w.st.issues['alanmasu/app#8'].labels, ['on develop']);
+});
+
+test('round 2/3: una PR di revert conserva le proprie keyword', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#7': open(), 'alanmasu/app#8': open(['on develop']) },
+    prs: { 30: { number: 30, body: 'Closes #8' } },
+  });
+  await run({ github: w.github, core: w.core, context: prEvent({ number: 31, body: 'Reverts alanmasu/app#30\n\nFixes #7' }), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#7'].labels, ['on develop']);
+  assert.deepEqual(w.st.issues['alanmasu/app#8'].labels, []);
+});
+
+test('round 2/4: push e PR della stessa merge arrivano allo stesso risultato in qualsiasi ordine', async () => {
+  const A = 'a'.repeat(40);
+  const M = 'm'.repeat(40);
+  const pr = { number: 40, merge_commit_sha: M, body: 'New approach. Closes #5' };
+  const mk = () => world({
+    issues: { 'alanmasu/app#5': open(['on develop']) },
+    commits: { [A]: { message: 'Fix crash, fixes #5' } },
+    prs: { 40: pr },
+    compare: [
+      { sha: 'r'.repeat(40), message: `Revert "Fix crash, fixes #5"\n\nThis reverts commit ${A}.` },
+      { sha: M, message: 'Merge pull request #40 from x/y', parents: 2 },
+    ],
+  });
+  const w1 = mk();
+  await run({ github: w1.github, core: w1.core, context: push('develop'), env: {} });
+  await run({ github: w1.github, core: w1.core, context: prEvent(pr), env: {} });
+  const w2 = mk();
+  await run({ github: w2.github, core: w2.core, context: prEvent(pr), env: {} });
+  await run({ github: w2.github, core: w2.core, context: push('develop'), env: {} });
+  assert.deepEqual(w1.st.issues['alanmasu/app#5'].labels, ['on develop']);
+  assert.deepEqual(w2.st.issues['alanmasu/app#5'].labels, ['on develop']);
+});
+
+test('round 2/5: riapertura che fallisce non fa fallire il run', async () => {
+  const w = world({ issues: { 'alanmasu/app#6': { state: 'closed', labels: ['do not close'] } } });
+  w.st.closer[6] = { __typename: 'Commit', abbreviatedOid: 'abc1234', oid: 'abc1234' };
+  w.github.rest.issues.update = async () => { throw err(403); };
+  await run({ github: w.github, core: w.core, context: closedEvent(6, ['do not close']), env: { OD_SKIP_LABEL: 'do not close' } });
+  assert.ok(w.logs.some((l) => l.includes('could not reopen it')));
+});

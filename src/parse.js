@@ -31,7 +31,7 @@ const REF_RE = new RegExp(
 );
 
 const REVERT_RE = /This reverts commit ([0-9a-f]{7,40})/i;
-const PR_REVERT_RE = new RegExp(`^Reverts (?:(${NAME})/(${NAME}))?#(\\d+)`, 'im');
+const PR_REVERT_RE = new RegExp(`^Reverts (?:(${NAME})/(${NAME}))?#(\\d+)\\s*$`, 'i');
 
 /**
  * Removes the parts of a markdown text that GitHub ignores: HTML comments, fenced code
@@ -47,7 +47,8 @@ function stripIgnored(text) {
     .replace(/(`+)[^`]*?\1/g, ' ');                                      // inline code
 }
 
-const REVERT_SUBJECT_RE = /^\s*(?:[*-]\s+)?Revert ".*"\s*$/;
+// optional " (#32)": GitHub appends the pull request number when a revert PR is squash-merged
+const REVERT_SUBJECT_RE = /^\s*(?:[*-]\s+)?Revert ".*"(?:\s*\(#\d+\))?\s*$/;
 const REVERT_LINE_RE = /This reverts commit ([0-9a-f]{7,40})/i;
 
 /**
@@ -101,9 +102,13 @@ function revertedSha(message) {
   return m ? m[1] : null;
 }
 
-/** If the description is the one of GitHub's "Revert" button, returns the reverted pull request. */
+/**
+ * If the description is the one of GitHub's "Revert" button ("Reverts owner/repo#N" as its first
+ * line), returns the reverted pull request. Comments and code are ignored.
+ */
 function revertedPr(body, current) {
-  const m = PR_REVERT_RE.exec(String(body || ''));
+  const first = stripIgnored(body).split('\n').map((l) => l.trim()).find((l) => l) || '';
+  const m = PR_REVERT_RE.exec(first);
   if (!m) return null;
   return { owner: m[1] || current.owner, repo: m[2] || current.repo, number: Number(m[3]) };
 }
