@@ -157,7 +157,11 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
         ];
       } catch (e) {
         core.warning(`Reverted pull request ${rev.owner}/${rev.repo}#${rev.number} not found: ${e.message}`);
-        return [];
+        // the revert's own keywords and links still count
+        return [
+          ...parseClosingRefs(pr.body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })),
+          ...(await manualLinks(pr, where)),
+        ];
       }
     }
     // same order as a push run: the commits first, then the description and links
@@ -406,7 +410,11 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     const after = String(context.payload.after || '').slice(0, 7);
     const rel = new Map();
     const put = (list, source) => { for (const e of list) rel.set(e.ref.key, { ...e, source }); };
+    // GitHub closes an issue when a closing keyword appears anywhere in a commit message that
+    // reaches the default branch (revert subjects included); the action closes the others
+    const githubCloses = new Set();
     for (const c of await pushedCommits()) {
+      for (const r of parseClosingRefs(c.message, current)) githubCloses.add(r.key);
       put(await effectsOfMessage(c.message, 0), `commit ${c.sha.slice(0, 7)}`);
       if (mayBePrMerge(c.parents, c.message) && !revertedSha(c.message)) {
         const pr = await prMergedBy(c.sha);
@@ -430,9 +438,9 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
       try {
         // commits with a closing keyword are closed by GitHub itself; pull request descriptions
         // and manual links of pull requests merged into develop are not, so close those here
-        // only issues that got the label when the pull request was merged: its description can be
-        // edited after the merge, so it is not trusted on its own
-        if (issue.state === 'open' && source.startsWith('pull request') && labelNamed(issue, opts.label)) {
+        // only issues GitHub does not close by itself, and only if they still have the label: a
+        // pull request description can be edited after the merge, so it is not trusted on its own
+        if (issue.state === 'open' && !githubCloses.has(ref.key) && labelNamed(issue, opts.label)) {
           if (!opts.dryRun) {
             await github.rest.issues.update({ owner: ref.owner, repo: ref.repo, issue_number: ref.number, state: 'closed', state_reason: 'completed' });
             await github.rest.issues.createComment({
@@ -514,8 +522,15 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     if (opts.skipLabel && hasLabel(issue, opts.skipLabel)) {
       skipped.push(where);
       core.info(`${where} has "${opts.skipLabel}": ignored.`);
-      if (action === 'add' && issue.state === 'open' && opts.warn) {
-        core.warning(`${where} has "${opts.skipLabel}" but ${source} will close it at release.`);
+      // descriptions of pull requests are warned about by the pull_request run only (the push run
+      // of the same merge sees them too), so the comment is written once
+      const descriptionInPush = event === 'push' && !source.startsWith('commit');
+      if (action === 'add' && issue.state === 'open' && opts.warn && !descriptionInPush) {
+        core.warning(
+          source.startsWith('commit')
+            ? `${where} has "${opts.skipLabel}" but ${source} will close it at release.`
+            : `${where} has "${opts.skipLabel}" and is referenced by ${source}: it stays open.`
+        );
         try {
           if (!(await hasMarker(github, ref, MARK_WARN)) && !opts.dryRun) {
             await github.rest.issues.createComment({

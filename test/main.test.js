@@ -664,3 +664,59 @@ test('round 3/D: git revert di una PR mergiata con squash toglie la label', asyn
   await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
   assert.deepEqual(w.st.issues['alanmasu/app#5'].labels, []);
 });
+
+// ------------------------------------------------------- round 3 end-to-end findings
+
+test('round 3 e2e/E1: fix solo da descrizione, revert squash e reapply: chiusa al rilascio', async () => {
+  const M66 = '6666666';
+  const S69 = '6969696';
+  const RA = '7070707';
+  const msgS69 = `Revert "Merge pull request #66 from x/a" (#69)\n\nThis reverts commit ${M66}, reversing\nchanges made to 0000001.`;
+  const msgRA = `Reapply "Revert "Merge pull request #66 from x/a" (#69)"\n\nThis reverts commit ${S69}.`;
+  const w = world({
+    issues: { 'alanmasu/app#56': open(['on develop']) },
+    commits: { [M66]: { message: 'Merge pull request #66 from x/a', parents: [{}, {}] }, [S69]: { message: msgS69 } },
+    prs: { 66: { number: 66, merge_commit_sha: M66, body: 'Fixes #56', commits: ['work'] },
+           69: { number: 69, merge_commit_sha: S69, body: 'Reverts alanmasu/app#66' } },
+    compare: [
+      { sha: M66, message: 'Merge pull request #66 from x/a', parents: 2 },
+      { sha: S69, message: msgS69 },
+      { sha: RA, message: msgRA },
+    ],
+  });
+  await run({ github: w.github, core: w.core, context: push('main', { after: 'f'.repeat(40) }), env: {} });
+  assert.equal(w.st.issues['alanmasu/app#56'].state, 'closed');
+  assert.deepEqual(w.st.released, ['alanmasu/app#56']);
+});
+
+test('round 3 e2e/E1 bis: al rilascio non chiude ciò che chiude GitHub (keyword in un commit)', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#64': open(['on develop']) },
+    compare: [{ sha: 'a'.repeat(40), message: 'fix: x\n\nFixes #64' }],
+  });
+  await run({ github: w.github, core: w.core, context: push('main', { after: 'f'.repeat(40) }), env: {} });
+  assert.equal(w.st.issues['alanmasu/app#64'].state, 'open'); // GitHub closes it
+  assert.deepEqual(w.st.issues['alanmasu/app#64'].labels, []);
+});
+
+test('round 3 e2e/E3: "Reverts #N" verso una PR inesistente conserva le proprie keyword', async () => {
+  const w = world({ issues: { 'alanmasu/app#75': open() } });
+  await run({ github: w.github, core: w.core, context: prEvent({ number: 77, body: 'Reverts alanmasu/app#9999\n\nFixes #75' }), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#75'].labels, ['on develop']);
+});
+
+test('round 3 e2e: avviso "do not close" da descrizione scritto una sola volta da push + PR in parallelo', async () => {
+  const M = '7373737';
+  const pr = { number: 73, merge_commit_sha: M, body: 'Closes #63' };
+  const w = world({
+    issues: { 'alanmasu/app#63': open(['do not close']) },
+    prs: { 73: pr },
+    compare: [{ sha: M, message: 'Merge pull request #73 from x/y', parents: 2 }],
+  });
+  const env = { OD_SKIP_LABEL: 'do not close' };
+  await Promise.all([
+    run({ github: w.github, core: w.core, context: push('develop'), env }),
+    run({ github: w.github, core: w.core, context: prEvent(pr), env }),
+  ]);
+  assert.equal(w.st.comments[63].length, 1);
+});

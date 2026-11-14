@@ -51,8 +51,9 @@ the cleanup, with a warning.
   reach it, so issues fixed only by pull request descriptions are not closed at release.
 - Very large pushes are checked up to 3000 commits; the first push of a new branch only sees the
   commits listed in the push event. Both cases are reported as warnings.
-- A push and a `pull_request_target` run for the same merge may, rarely, both post the
-  `do not close` warning comment.
+- When the same `do not close` issue is referenced both by a commit and by the description of the
+  pull request that merges it, the push run and the `pull_request_target` run may, rarely, both
+  post the warning comment.
 
 ### Issues labeled `do not close`
 
