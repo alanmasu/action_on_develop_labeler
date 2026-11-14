@@ -56,6 +56,10 @@ function world({ issues = {}, commits = {}, prs = {}, compare = [], repoLabels =
       return (prs[args.pull_number].commits || []).map((message) => ({ commit: { message } }));
     },
     graphql: async (q, v) => {
+      if (q.includes('lastEditedAt')) {
+        if (st.editCheckDown) throw new Error('graphql down');
+        return { repository: { pullRequest: { lastEditedAt: (st.edited && st.edited[v.n]) || null, mergedAt: '2026-01-01T00:00:00Z' } } };
+      }
       if (q.includes('timelineItems')) {
         if (st.graphqlDown) throw new Error('graphql down');
         const c = st.closer[v.n];
@@ -719,4 +723,155 @@ test('round 3 e2e: avviso "do not close" da descrizione scritto una sola volta d
     run({ github: w.github, core: w.core, context: prEvent(pr), env }),
   ]);
   assert.equal(w.st.comments[63].length, 1);
+});
+
+// ------------------------------------------------------- round 4 review findings
+
+// A: GitHub's default merge message carries the PR title; its keyword labels the issue, but a
+// revert of that merge does not undo it.
+test('round 4/A: revert of merge commit whose message (PR title) had the keyword', async () => {
+  const M = '7a7a7a7';
+  const mmsg = 'Merge pull request #7 from x/login\n\nFixes #5 login crash';
+  const w = world({
+    issues: { 'alanmasu/app#5': open() },
+    commits: { [M]: { message: mmsg, parents: [{}, {}] } },
+    prs: { 7: { number: 7, merge_commit_sha: M, body: 'stuff', commits: ['wip login'] } },
+    compare: [{ sha: M, message: mmsg, parents: 2 }],
+  });
+  await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#5'].labels, ['on develop']);
+  w.st.compareBy = { [`${'b'.repeat(40)}...${'a'.repeat(40)}`]: [
+    { sha: 'r'.repeat(40), message: `Revert "Merge pull request #7 from x/login"\n\nThis reverts commit ${M}, reversing\nchanges made to 0000001.` }] };
+  await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#5'].labels, [], 'label should be removed by the revert');
+});
+
+// B1: squash commit whose body contains a revert line -> PR description skipped at release
+const S4 = '5b5b5b5';
+const smsg = 'Feature (#9)\n\n* fixes #5\n\n* Revert "fixes #5"\n\nThis reverts commit abcdef1.\n\n* tests';
+test('round 4/B1: release does not close/unlabel issue fixed by description of a squash PR containing a revert', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#6': open(['on develop']), 'alanmasu/app#5': open() },
+    commits: { abcdef1: { message: 'fixes #5' }, [S4]: { message: smsg } },
+    prs: { 9: { number: 9, merge_commit_sha: S4, body: 'Closes #6' } },
+    compare: [{ sha: S4, message: smsg }],
+  });
+  // develop: PR run labels #6 (already labeled here); release:
+  await run({ github: w.github, core: w.core, context: push('main', { after: 'f'.repeat(40) }), env: {} });
+  assert.equal(w.st.issues['alanmasu/app#6'].state, 'closed', 'should be closed at release');
+});
+
+test('round 4/B2: develop push of same squash ignores the description; revert of the squash leaves the label', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#6': open(['on develop']), 'alanmasu/app#5': open() },
+    commits: { abcdef1: { message: 'fixes #5' }, [S4]: { message: smsg } },
+    prs: { 9: { number: 9, merge_commit_sha: S4, body: 'Closes #6' } },
+    compare: [{ sha: 'e'.repeat(40), message: `Revert "Feature (#9)"\n\nThis reverts commit ${S4}.` }],
+  });
+  await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#6'].labels, [], 'revert of the squash should remove label');
+});
+
+// B3: revert-button PR squash-merged, with its own keyword for the same issue: order-dependent
+test('round 4/B3: push and PR run of the same squash merge disagree', async () => {
+  const M7 = '7777777';
+  const S8 = '8888888';
+  const s8msg = `Revert "Fix login" (#8)\n\nThis reverts commit ${M7}, reversing\nchanges made to 0000001.`;
+  const mk = () => world({
+    issues: { 'alanmasu/app#5': open(['on develop']) },
+    commits: { [M7]: { message: 'Merge pull request #7 from x/a', parents: [{}, {}] }, [S8]: { message: s8msg } },
+    prs: { 7: { number: 7, merge_commit_sha: M7, body: 'Fixes #5', commits: ['wip'] },
+           8: { number: 8, merge_commit_sha: S8, body: 'Reverts alanmasu/app#7\n\nDifferent approach, fixes #5' } },
+    compare: [{ sha: S8, message: s8msg }],
+  });
+  const pr8 = { number: 8, merge_commit_sha: S8, body: 'Reverts alanmasu/app#7\n\nDifferent approach, fixes #5' };
+  const w1 = mk(); // push last
+  await run({ github: w1.github, core: w1.core, context: prEvent(pr8), env: {} });
+  await run({ github: w1.github, core: w1.core, context: push('develop'), env: {} });
+  const w2 = mk(); // PR last
+  await run({ github: w2.github, core: w2.core, context: push('develop'), env: {} });
+  await run({ github: w2.github, core: w2.core, context: prEvent(pr8), env: {} });
+  assert.deepEqual(w1.st.issues['alanmasu/app#5'].labels, w2.st.issues['alanmasu/app#5'].labels, 'order dependent');
+});
+
+// C: closer X, revert R1, re-fix Y, revert of Y R2 -> fix gone, but no reopen
+test('round 4/C: re-fix reverted afterwards: should reopen', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#5': { state: 'closed', labels: [] } },
+    commits: { abcdef1: { message: 'Fixes #5' }, '1111111': { message: 'Fix again, fixes #5' } },
+  });
+  w.st.closer[5] = { __typename: 'Commit', abbreviatedOid: 'abcdef1', oid: 'abcdef1' };
+  w.st.compareBy = { 'abcdef1...main': [
+    { sha: 'dddddd1', message: 'Revert "Fixes #5"\n\nThis reverts commit abcdef1.' },
+    { sha: '1111111', message: 'Fix again, fixes #5' },
+    { sha: 'dddddd2', message: 'Revert "Fix again, fixes #5"\n\nThis reverts commit 1111111.' },
+  ] };
+  await run({ github: w.github, core: w.core, context: closedEvent(5, []), env: {} });
+  assert.deepEqual(w.st.updates, ['5:open']);
+});
+
+// D: git's "Reapply" subject is parsed as a new fix
+test('round 4/D: Reapply subject counted as a fix', async () => {
+  const X = '9a9a9a9';
+  const xmsg = 'Fixes #5 (#9)\n\n* Fixes #5\n\n* Revert "Fixes #5"\n\nThis reverts commit abcdef1.';
+  const R = '9b9b9b9';
+  const rmsg = `Revert "Fixes #5 (#9)"\n\nThis reverts commit ${X}.`;
+  const w = world({
+    issues: { 'alanmasu/app#5': open() },
+    commits: { abcdef1: { message: 'Fixes #5' }, [X]: { message: xmsg }, [R]: { message: rmsg } },
+    prs: { 9: { number: 9, merge_commit_sha: X, body: 'no keywords' } },
+    compare: [{ sha: 'c'.repeat(40), message: `Reapply "Fixes #5 (#9)"\n\nThis reverts commit ${R}.` }],
+  });
+  await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#5'].labels, [], 'reapplying a net-zero unit should not label');
+});
+
+
+test('round 4/B3 bis: entrambi gli ordini tengono la label (la keyword della PR di revert conta)', async () => {
+  const M7 = '7777777';
+  const S8 = '8888888';
+  const s8msg = `Revert "Fix login" (#8)\n\nThis reverts commit ${M7}, reversing\nchanges made to 0000001.`;
+  const pr8 = { number: 8, merge_commit_sha: S8, body: 'Reverts alanmasu/app#7\n\nDifferent approach, fixes #5' };
+  const w = world({
+    issues: { 'alanmasu/app#5': open(['on develop']) },
+    commits: { [M7]: { message: 'Merge pull request #7 from x/a', parents: [{}, {}] }, [S8]: { message: s8msg } },
+    prs: { 7: { number: 7, merge_commit_sha: M7, body: 'Fixes #5', commits: ['wip'] }, 8: pr8 },
+    compare: [{ sha: S8, message: s8msg }],
+  });
+  await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#5'].labels, ['on develop']);
+});
+
+test('round 4/E: descrizione modificata dopo il merge: non usata per chiudere al rilascio', async () => {
+  const mk = () => world({
+    issues: { 'alanmasu/app#99': open(['on develop']) },
+    prs: { 20: { number: 20, merge_commit_sha: 'm'.repeat(40), merged_at: '2026-01-01T00:00:00Z', body: 'Typo fix\n\nFixes #99' } },
+    compare: [{ sha: 'm'.repeat(40), message: 'Merge pull request #20 from fork/typo', parents: 2 }],
+  });
+  const edited = mk();
+  edited.st.edited = { 20: '2026-02-01T00:00:00Z' };
+  await run({ github: edited.github, core: edited.core, context: push('main', { after: 'f'.repeat(40) }), env: {} });
+  assert.equal(edited.st.issues['alanmasu/app#99'].state, 'open');
+  assert.ok(edited.logs.some((l) => l.includes('edited after the merge')));
+  const unverifiable = mk();
+  unverifiable.st.editCheckDown = true;
+  await run({ github: unverifiable.github, core: unverifiable.core, context: push('main', { after: 'f'.repeat(40) }), env: {} });
+  assert.equal(unverifiable.st.issues['alanmasu/app#99'].state, 'open');
+  const untouched = mk();
+  await run({ github: untouched.github, core: untouched.core, context: push('main', { after: 'f'.repeat(40) }), env: {} });
+  assert.equal(untouched.st.issues['alanmasu/app#99'].state, 'closed');
+});
+
+test('round 4/C bis: due fix, uno solo annullato: resta chiusa', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#5': { state: 'closed', labels: [] } },
+    commits: { abcdef1: { message: 'Fixes #5' } },
+  });
+  w.st.closer[5] = { __typename: 'Commit', abbreviatedOid: 'abcdef1', oid: 'abcdef1' };
+  w.st.compareBy = { 'abcdef1...main': [
+    { sha: '1111111', message: 'Also fixes #5' },
+    { sha: 'dddddd2', message: 'Revert "Also fixes #5"\n\nThis reverts commit 1111111.' },
+  ] };
+  await run({ github: w.github, core: w.core, context: closedEvent(5, []), env: {} });
+  assert.deepEqual(w.st.updates, []);
 });

@@ -48,7 +48,8 @@ function stripIgnored(text) {
 }
 
 // optional " (#32)": GitHub appends the pull request number when a revert PR is squash-merged
-const REVERT_SUBJECT_RE = /^\s*(?:[*-]\s+)?Revert ".*"(?:\s*\(#\d+\))?\s*$/;
+// git >= 2.43 titles a revert of a revert 'Reapply "..."'
+const REVERT_SUBJECT_RE = /^\s*(?:[*-]\s+)?(?:Revert|Reapply) ".*"(?:\s*\(#\d+\))?\s*$/;
 const REVERT_LINE_RE = /This reverts commit ([0-9a-f]{7,40})/i;
 
 /**
