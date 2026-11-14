@@ -1,51 +1,51 @@
 'use strict';
 
 /**
- * Parsing delle "closing keywords" con le stesse regole di GitHub:
+ * Parses GitHub "closing keywords" with the same rules as GitHub:
  *
- *   KEYWORD #N                  -> issue nella stessa repo
- *   KEYWORD owner/repo#N        -> issue in un'altra repo
+ *   KEYWORD #N                  -> issue in the same repository
+ *   KEYWORD owner/repo#N        -> issue in another repository
  *   KEYWORD https://github.com/owner/repo/issues/N
  *
  * - keyword: close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved
- * - maiuscole/minuscole indifferenti, i due punti sono ammessi ("Closes: #10")
- * - ogni riferimento vuole la SUA keyword: "Fixes #1, #2" chiude solo #1
- * - nelle descrizioni delle PR (markdown) il testo in codice e commenti HTML viene ignorato;
- *   nei messaggi di commit no: GitHub li legge come testo semplice (verificato su GitHub)
+ * - case-insensitive, a colon is allowed ("Closes: #10")
+ * - every reference needs its OWN keyword: "Fixes #1, #2" closes only #1
+ * - in pull request descriptions (markdown) code and HTML comments are ignored;
+ *   in commit messages they are not: GitHub reads them as plain text (verified on GitHub)
  */
 
 const KEYWORDS = 'close[sd]?|fix(?:e[sd])?|resolve[sd]?';
 const NAME = '[A-Za-z0-9_.-]+';
 
 const REF_RE = new RegExp(
-  '(?<![A-Za-z0-9_])' +                       // la keyword deve iniziare una parola
+  '(?<![A-Za-z0-9_])' +                       // the keyword must start a word
   `(?:${KEYWORDS})` +
-  '(?:\\s*:\\s*|\\s+)' +                      // spazio e/o due punti
+  '(?:\\s*:\\s*|\\s+)' +                      // whitespace and/or colon
   '(?:' +
     `https?://github\\.com/(?<uOwner>${NAME})/(?<uRepo>${NAME})/issues/(?<uNum>\\d+)` +
     '|' +
     `(?:(?<owner>${NAME})/(?<repo>${NAME}))?#(?<num>\\d+)` +
   ')' +
-  '(?![A-Za-z0-9_])',                         // "#12abc" non è un riferimento
+  '(?![A-Za-z0-9_])',                         // "#12abc" is not a reference
   'gi'
 );
 
 const REVERT_RE = /This reverts commit ([0-9a-f]{7,40})/i;
 const PR_REVERT_RE = new RegExp(`^Reverts (?:(${NAME})/(${NAME}))?#(\\d+)`, 'im');
 
-/** Rimuove le parti di testo che GitHub non considera. */
+/** Removes the parts of a markdown text that GitHub ignores. */
 function stripIgnored(text) {
   return String(text || '')
-    .replace(/<!--[\s\S]*?-->/g, ' ')                 // commenti HTML (tipici dei template PR)
-    .replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, ' ') // blocchi di codice
-    .replace(/`[^`\n]*`/g, ' ');                       // codice inline
+    .replace(/<!--[\s\S]*?-->/g, ' ')                 // HTML comments (common in PR templates)
+    .replace(/^(```|~~~)[^\n]*\n[\s\S]*?^\1[^\n]*$/gm, ' ') // code blocks
+    .replace(/`[^`\n]*`/g, ' ');                       // inline code
 }
 
 /**
- * Estrae i riferimenti da chiudere.
+ * Extracts the references to close.
  * @param {string} text
- * @param {{owner: string, repo: string}} current repo in cui gira l'action
- * @param {{markdown?: boolean}} [options] true per le descrizioni delle PR
+ * @param {{owner: string, repo: string}} current repository the action runs in
+ * @param {{markdown?: boolean}} [options] true for pull request descriptions
  * @returns {{owner: string, repo: string, number: number, key: string}[]}
  */
 function parseClosingRefs(text, current, { markdown = false } = {}) {
@@ -66,13 +66,13 @@ function parseClosingRefs(text, current, { markdown = false } = {}) {
   return out;
 }
 
-/** Se il messaggio è un revert creato da git, restituisce lo SHA del commit annullato. */
+/** If the message is a revert created by git, returns the SHA of the reverted commit. */
 function revertedSha(message) {
   const m = REVERT_RE.exec(String(message || ''));
   return m ? m[1] : null;
 }
 
-/** Se la descrizione è quella del pulsante "Revert" di GitHub, restituisce la PR annullata. */
+/** If the description is the one of GitHub's "Revert" button, returns the reverted pull request. */
 function revertedPr(body, current) {
   const m = PR_REVERT_RE.exec(String(body || ''));
   if (!m) return null;

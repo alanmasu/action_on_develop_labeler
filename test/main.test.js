@@ -221,18 +221,18 @@ test('project: Status su develop e su revert, solo per elementi nel project', as
   });
   await run({ github: w.github, core: w.core, context: push('develop'), getOctokit: p.getOctokit, env: projEnv() });
   assert.deepEqual(p.calls, ['token:pat', 'item-node-alanmasu/app#1 F1=o-dev', 'item-node-alanmasu/app#3 F1=o-prog']);
-  assert.ok(w.logs.some((l) => l.includes('alanmasu/app#2 non è nel project')));
+  assert.ok(w.logs.some((l) => l.includes('alanmasu/app#2 is not in project')));
 });
 
 test('project: errori di configurazione fermano tutto prima di toccare le issue', async () => {
   const p = projectOctokit();
   const w = world({ issues: { 'alanmasu/app#1': open() }, compare: [{ sha: 'a'.repeat(40), message: 'fixes #1' }] });
   const go = (env) => run({ github: w.github, core: w.core, context: push('develop'), getOctokit: p.getOctokit, env });
-  await assert.rejects(go(projEnv({ OD_STATUS_ON_DEVELOP: 'Merged' })), /Opzione "Merged" inesistente.*In progress, On develop, Done/);
-  await assert.rejects(go(projEnv({ OD_STATUS_FIELD: 'Estimate' })), /tipo NUMBER/);
-  await assert.rejects(go(projEnv({ OD_STATUS_FIELD: 'Fase' })), /Campo "Fase" inesistente/);
-  await assert.rejects(go(projEnv({ OD_STATUS_ON_DEVELOP: '', OD_STATUS_ON_REVERT: '' })), /almeno uno/);
-  await assert.rejects(go({ OD_STATUS_ON_DEVELOP: 'On develop' }), /richiedono "project-url"/);
+  await assert.rejects(go(projEnv({ OD_STATUS_ON_DEVELOP: 'Merged' })), /Option "Merged" does not exist.*In progress, On develop, Done/);
+  await assert.rejects(go(projEnv({ OD_STATUS_FIELD: 'Estimate' })), /type NUMBER/);
+  await assert.rejects(go(projEnv({ OD_STATUS_FIELD: 'Fase' })), /Field "Fase" does not exist/);
+  await assert.rejects(go(projEnv({ OD_STATUS_ON_DEVELOP: '', OD_STATUS_ON_REVERT: '' })), /at least one/);
+  await assert.rejects(go({ OD_STATUS_ON_DEVELOP: 'On develop' }), /need "project-url"/);
   assert.deepEqual(w.st.issues['alanmasu/app#1'].labels, []);
 });
 
@@ -306,7 +306,7 @@ test('riapertura: chiusa a mano, senza label o disattivata -> resta chiusa', asy
   w.st.closer[6] = { __typename: 'Commit', abbreviatedOid: 'abc1234' };
   await run({ github: w.github, core: w.core, context: closedEvent(6, ['do not close']), env: { OD_SKIP_LABEL: 'do not close', OD_REOPEN_SKIPPED: 'false' } });
   assert.deepEqual(w.st.updates, []);
-  assert.ok(w.logs.some((l) => l.includes('chiusa a mano')));
+  assert.ok(w.logs.some((l) => l.includes('closed by hand')));
 });
 
 test('riapertura: fallback REST se GraphQL non risponde', async () => {
