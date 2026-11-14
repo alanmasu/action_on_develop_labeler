@@ -1,7 +1,7 @@
 version: 2
 updates:
-  # Aggiorna le action usate in action.yml (actions/github-script)
+  # "/" covers both action.yml and .github/workflows
   - package-ecosystem: github-actions
-    directories: ["/", "/.github/workflows"]
+    directory: /
     schedule:
       interval: weekly
