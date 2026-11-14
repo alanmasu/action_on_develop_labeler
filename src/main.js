@@ -123,9 +123,9 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     // order as a push run: a merge commit brings the PR's commits, then its own message, then the
     // description and links; a squash commit carries the commits in its own message
     const pr = mayBePrMerge(parents, data.commit.message) ? await prMergedBy(data.sha, where) : null;
-    if (pr && parents > 1) return effectsOfPr(pr, depth, { includeCommits: true, mergeMessage: data.commit.message });
+    if (pr && parents > 1) return effectsOfPr(pr, depth, { includeCommits: true, mergeMessage: data.commit.message, verifyBody: true });
     const out = await effectsOfMessage(data.commit.message, depth, where);
-    if (pr) out.push(...(await effectsOfPr(pr, depth, { includeCommits: false })));
+    if (pr) out.push(...(await effectsOfPr(pr, depth, { includeCommits: false, verifyBody: true })));
     return out;
   }
 
@@ -141,23 +141,27 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
   /** Effect of a merged pull request: description + manual links + its commit messages. */
   async function effectsOfPr(pr, depth, { includeCommits = true, mergeMessage = null, verifyBody = false } = {}) {
     const where = repoOf(pr);
-    const rev = revertedPr(pr.body, where);
+    // a description edited after the merge (or that cannot be checked) is not used at all when
+    // verification is asked: neither its "Reverts" line nor its keywords
+    const body = !verifyBody || (await bodyUnchangedSinceMerge(pr, where)) ? pr.body : '';
+    const rev = revertedPr(body, where);
     if (rev) {
       if (depth >= MAX_REVERT_DEPTH) return [];
       try {
         const { data: inner } = await github.rest.pulls.get({ owner: rev.owner, repo: rev.repo, pull_number: rev.number });
         if (!inner.base) inner.base = { repo: { owner: { login: rev.owner }, name: rev.repo } };
-        // the reverted pull request first, then the revert's own keywords and links
+        // the reverted pull request first, then the revert's own keywords and links; the reverted
+        // pull request is read now, possibly long after its merge, so its description is verified
         return [
-          ...invert(net(await effectsOfPr(inner, depth + 1))),
-          ...parseClosingRefs(pr.body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })),
+          ...invert(net(await effectsOfPr(inner, depth + 1, { verifyBody: true }))),
+          ...parseClosingRefs(body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })),
           ...(await manualLinks(pr, where)),
         ];
       } catch (e) {
         core.warning(`Reverted pull request ${rev.owner}/${rev.repo}#${rev.number} not found: ${e.message}`);
         // the revert's own keywords and links still count
         return [
-          ...parseClosingRefs(pr.body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })),
+          ...parseClosingRefs(body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })),
           ...(await manualLinks(pr, where)),
         ];
       }
@@ -173,9 +177,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
       }
     }
     if (mergeMessage) out.push(...(await effectsOfMessage(mergeMessage, depth, where)));
-    if (!verifyBody || (await bodyUnchangedSinceMerge(pr, where))) {
-      out.push(...parseClosingRefs(pr.body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })));
-    }
+    out.push(...parseClosingRefs(body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })));
     out.push(...(await manualLinks(pr, where)));
     return out;
   }
@@ -319,7 +321,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     const key = `${current.owner}/${current.repo}#${number}`.toLowerCase();
     const same = (a, b) => a.startsWith(b) || b.startsWith(a);
     const active = new Set();       // fixes currently applied
-    const undone = new Map();       // revert commit -> fix it undid
+    const undone = new Map();       // revert commit -> fixes it undid
     const contents = new Map();     // merge commit -> shas of its pull request commits
     let by = null;
 
@@ -342,18 +344,35 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
       return shas;
     }
 
+    const restored = new Map();     // re-apply commit -> fixes it brought back
+
     async function onRevert(target, commitSha) {
-      // re-apply: revert of a revert brings back what that revert undid
-      for (const [rev, fix] of undone) {
-        if (same(rev, target)) { undone.delete(rev); active.add(fix); return; }
+      const undo = (fixes) => {
+        const hit = [...fixes].filter((f) => active.has(f));
+        for (const f of hit) active.delete(f);
+        undone.set(commitSha, new Set(hit));
+        if (hit.length) by = commitSha.slice(0, 7);
+      };
+      // revert of a revert (re-apply): brings back every fix that revert undid
+      for (const [rev, fixes] of undone) {
+        if (same(rev, target)) {
+          undone.delete(rev);
+          for (const f of fixes) active.add(f);
+          restored.set(commitSha, fixes);
+          return;
+        }
       }
-      for (const fix of [...active]) {
-        if (same(fix, target)) { active.delete(fix); undone.set(commitSha, fix); by = commitSha.slice(0, 7); return; }
+      // revert of a re-apply: undoes again what it brought back
+      for (const [re, fixes] of restored) {
+        if (same(re, target)) { restored.delete(re); undo(fixes); return; }
       }
+      // revert of a fix
+      const direct = [...active].filter((f) => same(f, target));
+      if (direct.length) { undo(direct); return; }
       // revert of a pull request merge that contains active fixes
       const inside = await prCommitsOf(target);
-      const hit = [...active].filter((fix) => inside.some((x) => same(x, fix)));
-      for (const fix of hit) { active.delete(fix); undone.set(commitSha, fix); by = commitSha.slice(0, 7); }
+      const hit = [...active].filter((f) => inside.some((x) => same(x, f)));
+      if (hit.length) undo(hit);
     }
 
     async function scanMessage(sha, message) {
@@ -369,7 +388,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     const closerNet = net(await effectsOfMessage(closer.commit.message, 0)).find((e) => e.ref.key === key);
     if (closerNet && closerNet.action === 'remove') {
       by = closerSha.slice(0, 7);
-      for (const t of messageTokens(closer.commit.message)) if (t.revert) undone.set(closerSha, t.revert);
+      for (const t of messageTokens(closer.commit.message)) if (t.revert) undone.set(closerSha, new Set([t.revert]));
     } else {
       active.add(closerSha);
     }

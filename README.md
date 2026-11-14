@@ -48,6 +48,10 @@ the cleanup, with a warning.
 - In pull request descriptions, code (fenced, indented or inline) and HTML comments are ignored.
   When in doubt the action ignores more than GitHub would: a missed label is safer than a wrong
   closure.
+- A pull request **squash-merged into `develop`** whose commits include a fix and its revert: with
+  the squash message listing the commits (GitHub's "commit messages" setting), GitHub closes the
+  issue at release because the keyword is in that message, and the action does not reopen it,
+  although no fix is left. See issue #6.
 - If `develop` is **squash-merged** into the default branch, the pull request merge commits never
   reach it, so issues fixed only by pull request descriptions are not closed at release.
 - Very large pushes are checked up to 3000 commits; the first push of a new branch only sees the
