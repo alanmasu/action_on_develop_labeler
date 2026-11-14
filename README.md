@@ -43,6 +43,9 @@ the cleanup, with a warning.
 
 ### Known limits
 
+- On `develop`, reverting **one of two independent fixes** for the same issue removes the label
+  (and moves the project Status back), because a push run only sees the commits of that push. At
+  release the outcome is right: the remaining fix closes the issue and it stays closed.
 - Reverts are recognized by git's default message (`This reverts commit <sha>`); a revert whose
   message was rewritten by hand is not.
 - In pull request descriptions, code (fenced, indented or inline) and HTML comments are ignored.
