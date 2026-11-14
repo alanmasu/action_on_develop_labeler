@@ -366,12 +366,10 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
       for (const [re, fixes] of restored) {
         if (same(re, target)) { restored.delete(re); undo(fixes); return; }
       }
-      // revert of a fix
-      const direct = [...active].filter((f) => same(f, target));
-      if (direct.length) { undo(direct); return; }
-      // revert of a pull request merge that contains active fixes
+      // revert of a fix; if the target is a pull request merge, every fix it contains is undone
+      // too (a merge can be a fix itself, through its description, and contain fix commits)
       const inside = await prCommitsOf(target);
-      const hit = [...active].filter((f) => inside.some((x) => same(x, f)));
+      const hit = [...active].filter((f) => same(f, target) || inside.some((x) => same(x, f)));
       if (hit.length) undo(hit);
     }
 

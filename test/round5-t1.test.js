@@ -2,7 +2,7 @@ const { test, assert, run, world, push, prEvent, open, closedEvent, withShaCommi
 
 // F1: PR #10 merged with merge commit M; its commit A "fixes #5", description "Fixes #5".
 // The whole PR is reverted (GitHub revert button / git revert -m1 M). Release closes #5 via A.
-test('round 5/F1: revert of a merge whose description also fixes: should reopen', { todo: 'awaiting decision' }, async () => {
+test('round 5/F1: revert of a merge whose description also fixes: should reopen', async () => {
   const A = 'a1'.repeat(20);
   const M = 'b2'.repeat(20);
   const mmsg = 'Merge pull request #10 from x/crash\n\nFix crash';
