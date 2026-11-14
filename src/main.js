@@ -106,7 +106,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
         return [];
       }
     }
-    const out = parseClosingRefs(pr.body, current).map((ref) => ({ ref, action: 'add' }));
+    const out = parseClosingRefs(pr.body, current, { markdown: true }).map((ref) => ({ ref, action: 'add' }));
     out.push(...(await manualLinks(pr)));
     if (includeCommits) {
       try {

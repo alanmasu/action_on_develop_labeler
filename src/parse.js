@@ -10,7 +10,8 @@
  * - keyword: close, closes, closed, fix, fixes, fixed, resolve, resolves, resolved
  * - maiuscole/minuscole indifferenti, i due punti sono ammessi ("Closes: #10")
  * - ogni riferimento vuole la SUA keyword: "Fixes #1, #2" chiude solo #1
- * - il testo dentro blocchi di codice, codice inline e commenti HTML viene ignorato
+ * - nelle descrizioni delle PR (markdown) il testo in codice e commenti HTML viene ignorato;
+ *   nei messaggi di commit no: GitHub li legge come testo semplice (verificato su GitHub)
  */
 
 const KEYWORDS = 'close[sd]?|fix(?:e[sd])?|resolve[sd]?';
@@ -44,12 +45,14 @@ function stripIgnored(text) {
  * Estrae i riferimenti da chiudere.
  * @param {string} text
  * @param {{owner: string, repo: string}} current repo in cui gira l'action
+ * @param {{markdown?: boolean}} [options] true per le descrizioni delle PR
  * @returns {{owner: string, repo: string, number: number, key: string}[]}
  */
-function parseClosingRefs(text, current) {
+function parseClosingRefs(text, current, { markdown = false } = {}) {
   const out = [];
   const seen = new Set();
-  for (const m of stripIgnored(text).matchAll(REF_RE)) {
+  const source = markdown ? stripIgnored(text) : String(text || '');
+  for (const m of source.matchAll(REF_RE)) {
     const g = m.groups;
     const owner = g.uOwner || g.owner || current.owner;
     const repo = g.uRepo || g.repo || current.repo;

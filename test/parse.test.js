@@ -33,9 +33,15 @@ test('non sono riferimenti', () => {
   assert.deepEqual(keys('fixes https://github.com/o/r/pull/3'), []);
 });
 
-test('codice e commenti ignorati, duplicati rimossi', () => {
-  assert.deepEqual(keys('`fixes #1` <!-- closes #2 --> fixes #3 Fixes #3'), ['alanmasu/app#3']);
-  assert.deepEqual(keys('```\nfixes #9\n```\nresolves #10'), ['alanmasu/app#10']);
+const md = (t) => parseClosingRefs(t, cur, { markdown: true }).map((r) => r.key);
+
+test('descrizioni PR: codice e commenti ignorati, duplicati rimossi', () => {
+  assert.deepEqual(md('`fixes #1` <!-- closes #2 --> fixes #3 Fixes #3'), ['alanmasu/app#3']);
+  assert.deepEqual(md('```\nfixes #9\n```\nresolves #10'), ['alanmasu/app#10']);
+});
+
+test('messaggi di commit: testo semplice, come GitHub', () => {
+  assert.deepEqual(keys('This mentions `fixes #5` in code\n<!-- closes #6 -->'), ['alanmasu/app#5', 'alanmasu/app#6']);
 });
 
 test('revert', () => {

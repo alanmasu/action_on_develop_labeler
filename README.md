@@ -13,7 +13,7 @@ the default branch.
 | `Fixes owner/repo#12` | issue in another repository (needs `token`) |
 | `Fixes https://github.com/owner/repo/issues/12` | same as above |
 | `Fixes #1, #2` | only #1: every reference needs its own keyword |
-| text in `` `code` ``, code blocks or `<!-- comments -->` | ignored |
+| text in `` `code` ``, code blocks or `<!-- comments -->` of a **pull request description** | ignored (in commit messages it counts, as on GitHub) |
 | issue linked manually from the pull request *Development* sidebar | label |
 | `Revert "..."` commit, or pull request created with the **Revert** button | label removed |
 | revert of a revert | label added again |
