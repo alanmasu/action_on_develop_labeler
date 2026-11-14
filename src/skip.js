@@ -11,6 +11,17 @@ const MARK_REOPEN = '<!-- action_on_develop_labeler:reopened -->';
 const MARK_RELEASE = '<!-- action_on_develop_labeler:released -->';
 
 function warnText({ skipLabel, source, branch, number, reopen }) {
+  if (!source.startsWith('commit')) {
+    // a pull request description: GitHub only closes issues from descriptions of pull requests
+    // that target the default branch, and the release cleanup skips skip-labeled issues
+    return [
+      MARK_WARN,
+      `This issue is labeled \`${skipLabel}\`, but ${source} merged into \`${branch}\` references it with a closing keyword.`,
+      'It will stay open: the label keeps automations from closing it.',
+      '',
+      `Use \`Refs #${number}\` instead of \`Fixes #${number}\` for partial fixes.`,
+    ].join('\n');
+  }
   return [
     MARK_WARN,
     `This issue is labeled \`${skipLabel}\`, but ${source} on \`${branch}\` references it with a closing keyword.`,

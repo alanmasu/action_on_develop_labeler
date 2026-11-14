@@ -557,3 +557,10 @@ test('round 2/5: riapertura che fallisce non fa fallire il run', async () => {
   await run({ github: w.github, core: w.core, context: closedEvent(6, ['do not close']), env: { OD_SKIP_LABEL: 'do not close' } });
   assert.ok(w.logs.some((l) => l.includes('could not reopen it')));
 });
+
+test('round 2 e2e: avviso corretto quando la issue "do not close" è citata in una descrizione di PR', async () => {
+  const w = world({ issues: { 'alanmasu/app#42': open(['do not close']) } });
+  await run({ github: w.github, core: w.core, context: prEvent({ number: 51, body: 'Closes #42' }), env: { OD_SKIP_LABEL: 'do not close' } });
+  assert.match(w.st.comments[42][0].body, /PR #51 merged into `develop`.*\nIt will stay open/);
+  assert.doesNotMatch(w.st.comments[42][0].body, /GitHub will close/);
+});
