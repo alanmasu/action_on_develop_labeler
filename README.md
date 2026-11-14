@@ -30,9 +30,10 @@ When `develop` is merged into the default branch (needs `main` in the `push` bra
 - the label is **removed** from every released issue;
 - issues fixed only by a **pull request description** (`Closes #12` in a pull request merged into
   `develop`) are **closed** with a comment: GitHub does not close them, because that pull request
-  did not target the default branch. Only issues that still have the label are closed, and a
-  description edited after the merge (or that cannot be checked) is not used: anyone who opened
-  the pull request, also from a fork, can edit it;
+  did not target the default branch. Only issues that still have the label are closed. A
+  description edited after the merge (or that cannot be checked) is only used to **remove**
+  labels, never to add one or to close an issue: anyone who opened the pull request, also from a
+  fork, can edit it;
 - issues that GitHub closes because a commit with `Fixes #N` reached the default branch, but
   whose fix had been **reverted**, are **reopened** with a comment (needs the `issues: [closed]`
   trigger).

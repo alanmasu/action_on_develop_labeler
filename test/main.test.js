@@ -898,3 +898,48 @@ test('round 6/2: controllo dei fix annullati ignora descrizioni modificate dopo 
   await run({ github: untouched.github, core: untouched.core, context: closedEvent(5, []), env: {} });
   assert.deepEqual(untouched.st.updates, []); // a trusted description fixed it again
 });
+
+// ------------------------------------------------------- round 7 (half trust)
+
+test('round 7/G4: revert di una PR con descrizione modificata dopo il merge toglie la label', async () => {
+  const M = '1421421';
+  const w = world({
+    issues: { 'alanmasu/app#140': open(['on develop']) },
+    commits: { [M]: { message: 'Merge pull request #142 from x/w', parents: [{}, {}] } },
+    prs: { 142: { number: 142, merge_commit_sha: M, body: 'Fixes #140\n\n- [x] tested', commits: ['wip'] } },
+    compare: [{ sha: 'e'.repeat(40), message: `Revert "Merge pull request #142 from x/w"\n\nThis reverts commit ${M}, reversing\nchanges made to 0000001.` }],
+  });
+  w.st.edited = { 142: '2026-02-01T00:00:00Z' };
+  await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#140'].labels, []);
+});
+
+test('round 7/L2: al rilascio una PR modificata dopo il merge toglie la label ma non chiude', async () => {
+  const w = world({
+    issues: { 'alanmasu/app#5': open(['on develop']) },
+    prs: { 20: { number: 20, merge_commit_sha: 'm'.repeat(40), body: 'Fixes #5' } },
+    compare: [{ sha: 'm'.repeat(40), message: 'Merge pull request #20 from x/y', parents: 2 }],
+  });
+  w.st.edited = { 20: '2026-02-01T00:00:00Z' };
+  await run({ github: w.github, core: w.core, context: push('main', { after: 'f'.repeat(40) }), env: {} });
+  assert.equal(w.st.issues['alanmasu/app#5'].state, 'open');
+  assert.deepEqual(w.st.issues['alanmasu/app#5'].labels, []);
+  assert.ok(w.logs.some((l) => l.includes('used only to remove labels')));
+});
+
+test('round 7: una descrizione modificata non può aggiungere label (revert del revert)', async () => {
+  const M = '1431431';
+  const R = '2432432';
+  const w = world({
+    issues: { 'alanmasu/app#7': open() },
+    commits: {
+      [M]: { message: 'Merge pull request #143 from x/z', parents: [{}, {}] },
+      [R]: { message: `Revert "Merge pull request #143 from x/z"\n\nThis reverts commit ${M}, reversing\nchanges made to 0000001.` },
+    },
+    prs: { 143: { number: 143, merge_commit_sha: M, body: 'Typo\n\nFixes #7', commits: ['typo'] } },
+    compare: [{ sha: 'c'.repeat(40), message: `Reapply "Merge pull request #143 from x/z"\n\nThis reverts commit ${R}.` }],
+  });
+  w.st.edited = { 143: '2026-02-01T00:00:00Z' };
+  await run({ github: w.github, core: w.core, context: push('develop'), env: {} });
+  assert.deepEqual(w.st.issues['alanmasu/app#7'].labels, []);
+});

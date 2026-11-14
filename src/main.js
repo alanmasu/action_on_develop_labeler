@@ -57,7 +57,9 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
 
   /** key -> { ref, action: 'add' | 'remove', source } ; the last event wins */
   const effects = new Map();
+  const allowed = (e) => !(e.untrusted && e.action === 'add');
   const record = (list, source) => {
+    list = list.filter(allowed);
     for (const e of list) effects.set(e.ref.key, { ...e, source });
   };
 
@@ -141,9 +143,13 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
   /** Effect of a merged pull request: description + manual links + its commit messages. */
   async function effectsOfPr(pr, depth, { includeCommits = true, mergeMessage = null, verifyBody = false } = {}) {
     const where = repoOf(pr);
-    // a description edited after the merge (or that cannot be checked) is not used at all when
-    // verification is asked: neither its "Reverts" line nor its keywords
-    const body = !verifyBody || (await bodyUnchangedSinceMerge(pr, where)) ? pr.body : '';
+    // a description edited after the merge (or that cannot be checked) is only half trusted when
+    // verification is asked: its effects are marked "untrusted", and an untrusted effect can only
+    // remove a label, never add one or make the action close an issue
+    const body = pr.body;
+    const trusted = !verifyBody || (await bodyUnchangedSinceMerge(pr, where));
+    const mark = (list) => (trusted ? list : list.map((e) => ({ ...e, untrusted: true })));
+    const bodyAdds = () => mark(parseClosingRefs(body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })));
     const rev = revertedPr(body, where);
     if (rev) {
       if (depth >= MAX_REVERT_DEPTH) return [];
@@ -153,17 +159,14 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
         // the reverted pull request first, then the revert's own keywords and links; the reverted
         // pull request is read now, possibly long after its merge, so its description is verified
         return [
-          ...invert(net(await effectsOfPr(inner, depth + 1, { verifyBody: true }))),
-          ...parseClosingRefs(body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })),
+          ...mark(invert(net(await effectsOfPr(inner, depth + 1, { verifyBody: true })))),
+          ...bodyAdds(),
           ...(await manualLinks(pr, where)),
         ];
       } catch (e) {
         core.warning(`Reverted pull request ${rev.owner}/${rev.repo}#${rev.number} not found: ${e.message}`);
         // the revert's own keywords and links still count
-        return [
-          ...parseClosingRefs(body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })),
-          ...(await manualLinks(pr, where)),
-        ];
+        return [...bodyAdds(), ...(await manualLinks(pr, where))];
       }
     }
     // same order as a push run: the commits first, then the description and links
@@ -177,7 +180,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
       }
     }
     if (mergeMessage) out.push(...(await effectsOfMessage(mergeMessage, depth, where)));
-    out.push(...parseClosingRefs(body, where, { markdown: true }).map((ref) => ({ ref, action: 'add' })));
+    out.push(...bodyAdds());
     out.push(...(await manualLinks(pr, where)));
     return out;
   }
@@ -197,12 +200,12 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
       const p = res.repository.pullRequest;
       const merged = p.mergedAt || pr.merged_at;
       if (p.lastEditedAt && merged && new Date(p.lastEditedAt) > new Date(merged)) {
-        core.warning(`Pull request #${pr.number}: description edited after the merge, not trusted at release.`);
+        core.warning(`Pull request #${pr.number}: description edited after the merge, used only to remove labels.`);
         return false;
       }
       return true;
     } catch (e) {
-      core.warning(`Pull request #${pr.number}: cannot check whether the description was edited after the merge (${e.message}), not trusted at release.`);
+      core.warning(`Pull request #${pr.number}: cannot check whether the description was edited after the merge (${e.message}), used only to remove labels.`);
       return false;
     }
   }
@@ -383,7 +386,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     // the closer can be the revert itself: git's revert subject repeats the keywords
     // (Revert "Fix crash, fixes #5") and GitHub closes the issue because of it
     const { data: closer } = await github.rest.repos.getCommit({ ...current, ref: closerSha });
-    const closerNet = net(await effectsOfMessage(closer.commit.message, 0)).find((e) => e.ref.key === key);
+    const closerNet = net((await effectsOfMessage(closer.commit.message, 0)).filter((e) => !e.untrusted)).find((e) => e.ref.key === key);
     if (closerNet && closerNet.action === 'remove') {
       by = closerSha.slice(0, 7);
       for (const t of messageTokens(closer.commit.message)) if (t.revert) undone.set(closerSha, new Set([t.revert]));
@@ -480,7 +483,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
     }
     const released = [];
     const cleaned = [];
-    for (const { ref, action, source } of rel.values()) {
+    for (const { ref, action, source, untrusted } of rel.values()) {
       if (action !== 'add') continue;
       const where = `${ref.owner}/${ref.repo}#${ref.number}`;
       let issue;
@@ -497,7 +500,7 @@ module.exports = async function run({ github, context, core, getOctokit, env = p
         // and manual links of pull requests merged into develop are not, so close those here
         // only issues GitHub does not close by itself, and only if they still have the label: a
         // pull request description can be edited after the merge, so it is not trusted on its own
-        if (issue.state === 'open' && !githubCloses.has(ref.key) && labelNamed(issue, opts.label)) {
+        if (issue.state === 'open' && !untrusted && !githubCloses.has(ref.key) && labelNamed(issue, opts.label)) {
           if (!opts.dryRun) {
             await github.rest.issues.update({ owner: ref.owner, repo: ref.repo, issue_number: ref.number, state: 'closed', state_reason: 'completed' });
             await github.rest.issues.createComment({
