@@ -81,4 +81,8 @@ runs:
         github-token: ${{ inputs.token }}
         script: |
           const run = require(require('path').join(process.env.OD_ACTION_PATH, 'src', 'main.js'));
-          await run({ github, context, core, getOctokit });
+          // github-script does not always expose getOctokit: build the client from the existing one
+          const makeOctokit = typeof getOctokit === 'function'
+            ? getOctokit
+            : (token) => new github.constructor({ auth: token });
+          await run({ github, context, core, getOctokit: makeOctokit });
